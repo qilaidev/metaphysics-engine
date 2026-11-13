@@ -1,0 +1,17 @@
+# 本地开发用的外部依赖。引擎本身无状态，唯一的可选依赖是 Redis（跨实例共享排盘缓存）。
+# 单实例开发通常连这个都不需要：不配 REDIS_URL，进程内缓存就够了。
+services:
+  redis:
+    image: redis:7
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:

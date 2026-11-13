@@ -1,0 +1,2873 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Metaphysics Engine API",
+    "version": "2.0.0",
+    "description": "中国传统术数的算法能力层：八字、紫微斗数、六爻纳甲、大六壬、奇门遁甲、八宅风水、\n择吉、姓名五格，以及塔罗、周易起卦、星座、合盘。\n\n**结构归引擎，断语归调用方**（口径真源 `constants/rulings.js`，响应 `school` 字段回传本次选用）：盘怎么排（三传、安星、排局、游年）有唯一正确答案，引擎必须算准；盘怎么解（庙旺利陷、奇门格局）各家分歧大，引擎只把断语所需的原料给全。\n有流派分歧的排盘口径（藏干权重、闰月归属、拆补定局、转盘排星）一律登记在 rulings.js，并由 `rulings_lock` 测试钉死；换派只改那里。\n\n**无状态**：不存数据、不认用户、没有数据库。同样的入参永远得到同样的结果，\n可以随意水平扩容，也不需要迁移或备份。\n\n**无鉴权**：所有端点都是公开的，靠限流而不是身份来控制成本。\n需要访问控制请放在反向代理层。唯一带凭据的是 `/api-docs`（Basic）和 `/metrics`（Bearer），\n它们都不是能力端点。\n\n`/ai-interpret` 这类端点会调用外部大模型，是唯一有副作用（花钱、可能超时）的一类；\n排盘类端点纯本地计算。"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4000",
+      "description": "API 服务器"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "metricsToken": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "docsBasic": {
+        "type": "http",
+        "scheme": "basic"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "错误信息"
+          }
+        }
+      },
+      "DependencyCheck": {
+        "type": "object",
+        "description": "单个依赖的探测结果。",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "disabled",
+              "unavailable"
+            ]
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "HealthCheck": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "ready",
+              "not_ready",
+              "shutting_down"
+            ]
+          },
+          "checks": {
+            "type": "object",
+            "description": "依赖名 -> 状态。目前只有 redis，且它是可选的：没配 REDIS_URL 时为 disabled，视为健康。",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DependencyCheck"
+            }
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "uptime": {
+            "type": "number",
+            "description": "运行时间（秒）"
+          }
+        }
+      },
+      "AliveCheck": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "alive"
+            ]
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "uptime": {
+            "type": "number"
+          }
+        }
+      },
+      "Pillar": {
+        "type": "object",
+        "description": "一柱：天干 + 地支，各带五行属性与汉字。",
+        "properties": {
+          "stem": {
+            "type": "string",
+            "example": "Geng"
+          },
+          "branch": {
+            "type": "string",
+            "example": "Wu"
+          },
+          "elementStem": {
+            "type": "string",
+            "example": "Metal"
+          },
+          "elementBranch": {
+            "type": "string",
+            "example": "Fire"
+          },
+          "charStem": {
+            "type": "string",
+            "example": "庚"
+          },
+          "charBranch": {
+            "type": "string",
+            "example": "午"
+          }
+        }
+      },
+      "Pillars": {
+        "type": "object",
+        "properties": {
+          "year": {
+            "$ref": "#/components/schemas/Pillar"
+          },
+          "month": {
+            "$ref": "#/components/schemas/Pillar"
+          },
+          "day": {
+            "$ref": "#/components/schemas/Pillar"
+          },
+          "hour": {
+            "$ref": "#/components/schemas/Pillar"
+          }
+        }
+      },
+      "TrueSolarTime": {
+        "type": "object",
+        "nullable": true,
+        "description": "真太阳时校正结果。只有同时解析出经度（来自 birthLocation）和时区偏移时才会生成；否则整个字段为 null —— 不会静默按 0 处理。",
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "correctionMinutes": {
+            "type": "number",
+            "description": "相对钟表时间的偏移分钟数"
+          },
+          "correctedIso": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "location": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "nullable": true
+              },
+              "cn": {
+                "type": "string",
+                "nullable": true,
+                "description": "中文名，坐标串输入时为 null"
+              },
+              "latitude": {
+                "type": "number"
+              },
+              "longitude": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      "LocationResolution": {
+        "type": "object",
+        "description": "真太阳时校正的下场与原因。`trueSolarTime` 只说校正生没生效，说不了为什么 —— 没填出生地、显式关掉、填了但认不出、认出来了却没有时区可用，四种情况的 trueSolarTime 都是 null，但只有后两种是调用方能改的。要判断校正是否生效仍看 trueSolarTime，这个字段是拿来排查的。",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "unresolved",
+              "no-timezone",
+              "absent",
+              "disabled"
+            ],
+            "description": "applied 已校正并用于排盘；unresolved 填了但认不出；no-timezone 地名认得但缺时区偏移，标准经线算不出；absent 没填 birthLocation；disabled 调用方传了 trueSolarTime: false。除 applied 外都是按钟表时间排的盘。"
+          },
+          "input": {
+            "type": "string",
+            "nullable": true,
+            "description": "原样回显的 birthLocation"
+          },
+          "matched": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "name": {
+                "type": "string",
+                "nullable": true
+              },
+              "cn": {
+                "type": "string",
+                "nullable": true
+              }
+            }
+          },
+          "source": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "known",
+              "coordinates",
+              null
+            ],
+            "description": "known 命中城市表；coordinates 直接解析了 \"纬度,经度\" 坐标串"
+          },
+          "hint": {
+            "type": "string",
+            "nullable": true,
+            "description": "status 非 applied 时给出的下一步；applied 时为 null"
+          }
+        }
+      },
+      "BaziCalculationRequest": {
+        "type": "object",
+        "required": [
+          "birthYear",
+          "birthMonth",
+          "birthDay",
+          "birthHour",
+          "gender"
+        ],
+        "properties": {
+          "birthYear": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9999,
+            "example": 1990
+          },
+          "birthMonth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12,
+            "example": 5
+          },
+          "birthDay": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 31,
+            "example": 20
+          },
+          "birthHour": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 23,
+            "example": 14
+          },
+          "birthMinute": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 59,
+            "default": 0
+          },
+          "gender": {
+            "type": "string",
+            "enum": [
+              "male",
+              "female"
+            ],
+            "example": "male"
+          },
+          "birthLocation": {
+            "type": "string",
+            "description": "地名或 \"纬度,经度\" 坐标串。认得的地名见 GET /api/locations；解析不出经度时不做真太阳时校正，但排盘照常返回。",
+            "example": "Beijing"
+          },
+          "timezone": {
+            "type": "string",
+            "example": "Asia/Shanghai"
+          },
+          "timezoneOffsetMinutes": {
+            "type": "integer",
+            "description": "给了就优先于 timezone，用于无法解析 IANA 时区名的调用方。"
+          }
+        }
+      },
+      "BaziCalculation": {
+        "type": "object",
+        "properties": {
+          "pillars": {
+            "$ref": "#/components/schemas/Pillars"
+          },
+          "fiveElements": {
+            "type": "object",
+            "description": "五行计数。",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "fiveElementsPercent": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "tenGods": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "strength": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "luckCycles": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "八步大运，每步带十神、纳音与逐年流年"
+          },
+          "luckStart": {
+            "type": "object",
+            "description": "起运还需几年几月几天，以及交运的公历日期"
+          },
+          "analysis": {
+            "type": "object",
+            "description": "断命层，也是该拿去做判断的那一份：藏干加权五行、身强身弱、扶抑法用神喜忌、调候用神（穷通宝鉴）、月令格局、逐柱藏干与十神、神煞、四柱刑冲合会、旬空、胎元胎息命宫身宫。与顶层 fiveElements 的个数统计不是一回事。",
+            "properties": {
+              "usefulGod": {
+                "type": "object",
+                "nullable": true,
+                "description": "扶抑法用神喜忌。中和局时 favorable 为空数组，此时看 tiaohou。"
+              },
+              "tiaohou": {
+                "type": "object",
+                "nullable": true,
+                "description": "调候用神（《穷通宝鉴》表）。与扶抑并列而非替代：扶抑论强弱、调候论寒暖燥湿。stems[0] 为主用，其余辅用；revealed / hidden 标该用神是否已现于四柱。"
+              },
+              "monthlyStructure": {
+                "type": "object",
+                "nullable": true,
+                "description": "月令格局。facts 是结构事实（月令藏干各是什么、透在哪一柱、什么十神），无流派分歧；suggested 是按《子平真诠》一派推出的格，换派照 facts 自行重推即可。"
+              },
+              "keyPoints": {
+                "type": "object",
+                "nullable": true,
+                "description": "胎元（月柱推）、胎息（日柱推）、命宫与身宫（月支时支推、宫干起五虎遁）。四者判据各不相同，不要互相代入。"
+              }
+            }
+          },
+          "chartTime": {
+            "type": "object",
+            "description": "实际用于排盘的时刻。真太阳时生效时 used 与 trueSolarTime.clockTime 会不同，差一个时辰即差一柱。locationResolution 说明出生地解析的结果。",
+            "properties": {
+              "used": {
+                "type": "object"
+              },
+              "trueSolarTime": {
+                "$ref": "#/components/schemas/TrueSolarTime"
+              },
+              "locationResolution": {
+                "$ref": "#/components/schemas/LocationResolution"
+              }
+            }
+          },
+          "strength": {
+            "type": "object"
+          },
+          "timezoneOffsetMinutes": {
+            "type": "integer",
+            "nullable": true
+          },
+          "trueSolarTime": {
+            "$ref": "#/components/schemas/TrueSolarTime"
+          },
+          "locationResolution": {
+            "$ref": "#/components/schemas/LocationResolution"
+          }
+        }
+      },
+      "AiContent": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "Markdown 文本"
+          }
+        }
+      },
+      "AiInterpretRequestBase": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "覆盖默认供应商。可用值见 GET /api/ai/providers；不可用会返回 400。",
+            "enum": [
+              "openai",
+              "anthropic",
+              "mock"
+            ]
+          }
+        }
+      },
+      "Location": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "example": "Beijing"
+          },
+          "cn": {
+            "type": "string",
+            "nullable": true,
+            "example": "北京"
+          },
+          "latitude": {
+            "type": "number",
+            "example": 39.9042
+          },
+          "longitude": {
+            "type": "number",
+            "example": 116.4074
+          }
+        }
+      },
+      "TarotCard": {
+        "type": "object",
+        "properties": {
+          "position": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "isReversed": {
+            "type": "boolean"
+          },
+          "meaningUp": {
+            "type": "string"
+          },
+          "meaningRev": {
+            "type": "string"
+          },
+          "positionLabel": {
+            "type": "string"
+          },
+          "positionMeaning": {
+            "type": "string"
+          }
+        }
+      },
+      "Hexagram": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "中文卦名，如「水雷屯」",
+            "example": "乾为天"
+          },
+          "nameEn": {
+            "type": "string",
+            "description": "上下卦方位描述，如 Heaven over Heaven"
+          },
+          "sequence": {
+            "type": "integer",
+            "description": "《周易》卦序 1..64",
+            "example": 1
+          },
+          "number": {
+            "type": "integer"
+          },
+          "upperTrigram": {
+            "type": "object"
+          },
+          "lowerTrigram": {
+            "type": "object"
+          }
+        }
+      },
+      "ZodiacSign": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "example": "leo"
+          },
+          "value": {
+            "type": "string",
+            "example": "leo"
+          },
+          "name": {
+            "type": "string"
+          },
+          "dateRange": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/live": {
+      "get": {
+        "tags": [
+          "运维"
+        ],
+        "summary": "存活探针（只看进程）",
+        "description": "不探任何依赖，进程能应答就返回 200。给 orchestrator 的 livenessProbe 用。",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AliveCheck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "运维"
+        ],
+        "summary": "健康检查（含依赖）",
+        "description": "结果在生产环境有 1 秒缓存，所以高频轮询不会打穿依赖。引擎无状态，唯一依赖 Redis 又是可选的，因此没配 Redis 时本端点与 /live 结论一致。",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheck"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "依赖不可用，或进程正在优雅退出",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "运维"
+        ],
+        "summary": "Prometheus 抓取端点",
+        "description": "未配置 METRICS_TOKEN 时：生产环境返回 404（视为未暴露），非生产环境免鉴权开放。",
+        "security": [
+          {
+            "metricsToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prometheus 文本格式",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "token 不匹配",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "生产环境未配置 METRICS_TOKEN",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/live": {
+      "get": {
+        "tags": [
+          "运维"
+        ],
+        "summary": "存活探针（/live 的 /api 前缀别名）",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AliveCheck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "运维"
+        ],
+        "summary": "健康检查（/health 的 /api 前缀别名）",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheck"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "不健康",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ready": {
+      "get": {
+        "tags": [
+          "运维"
+        ],
+        "summary": "就绪探针",
+        "description": "收到 SIGTERM 后立刻转 503（早于停止监听），让负载均衡在进程还能处理存量请求时先摘掉它。",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheck"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "未就绪或正在排空",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthCheck"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/system/cache-status": {
+      "get": {
+        "tags": [
+          "运维"
+        ],
+        "summary": "缓存状态",
+        "description": "排盘缓存是否挂上了 Redis 镜像。没挂不影响正确性，只影响多实例命中率。",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "redis": {
+                      "$ref": "#/components/schemas/DependencyCheck"
+                    },
+                    "baziCache": {
+                      "type": "object",
+                      "properties": {
+                        "mirror": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai/providers": {
+      "get": {
+        "tags": [
+          "AI"
+        ],
+        "summary": "可用的 AI 供应商",
+        "description": "未配置 API key 的供应商 enabled 为 false，选它会被 400 拒绝。",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "activeProvider": {
+                      "type": "string"
+                    },
+                    "providers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/bazi/calculate": {
+      "post": {
+        "tags": [
+          "八字"
+        ],
+        "summary": "八字排盘",
+        "description": "纯计算。命中缓存时响应头 `x-bazi-cache: hit`，否则 `miss`——缓存只影响延迟，不影响结果。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BaziCalculationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BaziCalculation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "入参非法（含非法日期、纯空白字符串）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "计算失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/bazi/ai-interpret": {
+      "post": {
+        "tags": [
+          "八字",
+          "AI"
+        ],
+        "summary": "八字 AI 解读",
+        "description": "接收 /api/bazi/calculate 的输出，返回解读文本。同一调用方同时只允许一个 AI 请求。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/AiInterpretRequestBase"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "pillars"
+                    ],
+                    "properties": {
+                      "pillars": {
+                        "$ref": "#/components/schemas/Pillars"
+                      },
+                      "fiveElements": {
+                        "type": "object"
+                      },
+                      "tenGods": {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      },
+                      "luckCycles": {
+                        "type": "array",
+                        "items": {
+                          "type": "object"
+                        }
+                      },
+                      "strength": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "AI 解读文本（Markdown）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiContent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "入参缺失，或指定了不可用的 provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一调用方已有一个 AI 请求在处理中",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "上游 AI 供应商不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/bazi/full-analysis": {
+      "post": {
+        "tags": [
+          "八字",
+          "AI"
+        ],
+        "summary": "八字排盘 + AI 解读（一次调用）",
+        "description": "calculate 与 ai-interpret 的合并调用，省一个来回。入参同 calculate。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/AiInterpretRequestBase"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BaziCalculationRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/BaziCalculation"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "calculation": {
+                          "$ref": "#/components/schemas/BaziCalculation"
+                        },
+                        "interpretation": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "入参非法，或指定了不可用的 provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一调用方已有一个 AI 请求在处理中",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "分析失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ziwei/calculate": {
+      "post": {
+        "tags": [
+          "紫微斗数"
+        ],
+        "summary": "紫微斗数排盘",
+        "description": "返回十二宫与星曜分布。时刻解析与八字同一套：给了出生地与时区按真太阳时排，中国地点缺时区默认北京时间，1986–1991 夏令时墙钟先归一；实际所用时刻回显在 chartTime。\n每宫带 trine（三方四正：本宫 + 对宫 + 三合二宫，含展开后的星曜清单）、stars.minorB（乙级星，每颗附安星规则 basis）与 gods（长生 / 博士 / 岁前 / 将前四组十二神）。顶层另有 mingZhu（命主，按命宫地支）与 shenZhu（身主，按生年支）。庙旺利陷仍不实现 —— 各家表不同，属断语层。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "birthYear",
+                  "birthMonth",
+                  "birthDay",
+                  "birthHour",
+                  "gender"
+                ],
+                "properties": {
+                  "birthYear": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999,
+                    "example": 1990
+                  },
+                  "birthMonth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12,
+                    "example": 5
+                  },
+                  "birthDay": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 31,
+                    "example": 20
+                  },
+                  "birthHour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "example": 14
+                  },
+                  "birthMinute": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 59,
+                    "default": 0
+                  },
+                  "gender": {
+                    "type": "string",
+                    "enum": [
+                      "male",
+                      "female"
+                    ],
+                    "example": "male"
+                  },
+                  "birthLocation": {
+                    "type": "string",
+                    "description": "出生地名或「纬度,经度」，用于真太阳时"
+                  },
+                  "timezone": {
+                    "type": "string",
+                    "example": "Asia/Shanghai"
+                  },
+                  "timezoneOffsetMinutes": {
+                    "type": "integer",
+                    "nullable": true
+                  },
+                  "trueSolarTime": {
+                    "type": "boolean",
+                    "description": "传 false 关闭真太阳时"
+                  },
+                  "flowYear": {
+                    "type": "integer",
+                    "description": "流年公历年份（可选）。给了就附上该年流年命宫、流年四化、小限与所值大限（响应 flowYear）。"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "palaces": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "flowYear": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "给了 flowYear 才有"
+                    },
+                    "chartTime": {
+                      "type": "object",
+                      "description": "实际所用时刻、真太阳时与夏令时归一记录"
+                    },
+                    "timezoneOffsetMinutes": {
+                      "type": "integer",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "缺少必填字段或取值越界",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "计算失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tarot/cards": {
+      "get": {
+        "tags": [
+          "塔罗"
+        ],
+        "summary": "完整牌库",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "cards": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TarotCard"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tarot/draw": {
+      "post": {
+        "tags": [
+          "塔罗"
+        ],
+        "summary": "抽牌",
+        "description": "牌阵未知时回退到 SingleCard，不会报错。\n不给 seed 时每次重新随机；给了 seed 则同一 seed + 同一牌阵必得同一副牌与同一组正逆，可用于幂等重试与回归基准（响应的 reproducible 字段会标出）。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "spreadType": {
+                    "type": "string",
+                    "default": "SingleCard",
+                    "example": "ThreeCard"
+                  },
+                  "seed": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "example": "demo-2026",
+                    "description": "任意字符串或有限数字。给了它这次抽牌就是确定性的；超过 200 字符返回 400（不截断）。"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "spreadType": {
+                      "type": "string"
+                    },
+                    "seed": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "实际生效的 seed，未给则为 null"
+                    },
+                    "reproducible": {
+                      "type": "boolean",
+                      "description": "true 时同参数重放必得同一结果，可作幂等重试与回归基准"
+                    },
+                    "cards": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TarotCard"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "seed 不是字符串或有限数字，或超过 200 字符",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tarot/ai-interpret": {
+      "post": {
+        "tags": [
+          "塔罗",
+          "AI"
+        ],
+        "summary": "塔罗 AI 解读",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/AiInterpretRequestBase"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "cards"
+                    ],
+                    "properties": {
+                      "spreadType": {
+                        "type": "string"
+                      },
+                      "cards": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "$ref": "#/components/schemas/TarotCard"
+                        }
+                      },
+                      "userQuestion": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "AI 解读文本（Markdown）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiContent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "入参缺失，或指定了不可用的 provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一调用方已有一个 AI 请求在处理中",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "上游 AI 供应商不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/iching/hexagrams": {
+      "get": {
+        "tags": [
+          "周易"
+        ],
+        "summary": "六十四卦全表",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hexagrams": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Hexagram"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/iching/divine": {
+      "post": {
+        "tags": [
+          "周易"
+        ],
+        "summary": "起卦",
+        "description": "method=number 需要恰好三个数字；method=time 用服务器当前时间起卦，此时 numbers 被忽略。响应含本卦、之卦、互错综三变卦，以及逐爻的老少阴阳与《周易》爻辞（detailedLines）。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "number",
+                      "time"
+                    ],
+                    "default": "number"
+                  },
+                  "numbers": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "minItems": 3,
+                    "maxItems": 3
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "hexagram": {
+                      "$ref": "#/components/schemas/Hexagram"
+                    },
+                    "variants": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "卦变三种，纯位运算：mutual 互卦（取二三四为下、三四五为上，论事之中段）、opposite 错卦（六爻阴阳互易，论事之反面）、reversed 综卦（六爻倒置，论对方所见）。"
+                    },
+                    "changingLines": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      }
+                    },
+                    "timeContext": {
+                      "type": "object",
+                      "nullable": true
+                    },
+                    "method": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "数字个数不对、不是有效数字，或无法据此推出卦象",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/liuyao/chart": {
+      "post": {
+        "tags": [
+          "六爻"
+        ],
+        "summary": "六爻纳甲装卦",
+        "description": "给定六爻与动爻，装出可断之卦：卦名、八宫归属、世应、纳甲干支、六亲、六神、伏神、旬空、动爻变卦，卦上带《周易》卦辞与大象、每爻带爻辞。不给起卦日期则取服务器当日，此时结果不可复现 —— 响应的 castDate 会回显实际所用日期。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "lines"
+                ],
+                "properties": {
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "enum": [
+                        0,
+                        1
+                      ]
+                    },
+                    "minItems": 6,
+                    "maxItems": 6,
+                    "description": "自初爻至上爻，0 为阴、1 为阳"
+                  },
+                  "changingLines": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 6
+                    },
+                    "description": "动爻位置，1 为初爻"
+                  },
+                  "year": {
+                    "type": "integer"
+                  },
+                  "month": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12
+                  },
+                  "day": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 31
+                  },
+                  "hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "起卦时辰。23 点按子初换日取次日日干支；月建按交节时刻定。不给则按正午取。"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "卦名与《周易》序号"
+                    },
+                    "palace": {
+                      "type": "object",
+                      "description": "八宫归属、世卦名目、世应爻位"
+                    },
+                    "yaos": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "六爻详情：纳甲、六亲、六神、世应、动否、月建日辰作用；动爻的 changedTo.shift 标进神 / 退神 / 爻伏吟 / 爻反吟"
+                    },
+                    "hiddenSpirits": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "伏神"
+                    },
+                    "xunkong": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "旬空"
+                    },
+                    "changedHexagram": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "之卦"
+                    },
+                    "hexagramType": {
+                      "type": "object",
+                      "description": "本卦与之卦是否为六冲卦 / 六合卦。六冲变六合与六合变六冲断法迥异。"
+                    },
+                    "trigramShift": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "内外卦的伏吟返吟：三爻纳甲支全同为伏吟、全冲为返吟。该卦无动爻时为 null —— 静卦必然与自己相同，那不是伏吟。"
+                    },
+                    "interactions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "动爻对他爻的生克。月建日辰是外力，这里是盘内的力，断卦两者都要。"
+                    },
+                    "pairRelations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "六爻之间的冲与合，不分动静。"
+                    },
+                    "castDate": {
+                      "type": "object",
+                      "description": "起卦日期与日干支、月建"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "爻数不对、动爻位越界，或起卦日期非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/liuren/chart": {
+      "post": {
+        "tags": [
+          "大六壬"
+        ],
+        "summary": "大六壬起课",
+        "description": "月将加时得天地盘，起四课、三传、十二天将。不给日期时辰则取服务器当下。三传九宗门全备：贼克（元首/重审）、比用（知一）、涉害（含见机/察微）、遥克（蒿矢/弹射）、昴星（虎视/冬蛇掩目）、别责、八专、伏吟（自任/自信）、返吟（无亲）。取传次第：贼克 → 比用 → 涉害 → 八专 → 遥克 → 别责/昴星；伏吟、返吟因天地盘特殊先行判定。八专「不取遥克」，故排在遥克之前。口径：月将取月建六合、**中气**换将；涉害自所乘地盘位**顺行**归本家，下贼上数受克、上克下数所克。courseType 给课体名目，shehaiDepths 在涉害时给出各候选深浅。\n三传与四课上神各带遁干（按日干支所属之旬）、所乘天将、六亲（以日干为我）与旬空标记 —— 遁干取不到即该神落旬空，与 isXunkong 互为印证。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "year": {
+                    "type": "integer"
+                  },
+                  "month": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12
+                  },
+                  "day": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 31
+                  },
+                  "hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "占时"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dayGanzhi": {
+                      "type": "string"
+                    },
+                    "hourBranch": {
+                      "type": "string",
+                      "description": "占时地支"
+                    },
+                    "monthGeneral": {
+                      "type": "object",
+                      "description": "月将，含所值中气"
+                    },
+                    "stemLodging": {
+                      "type": "string",
+                      "description": "日干寄宫"
+                    },
+                    "earthPlate": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "地盘，恒定"
+                    },
+                    "heavenPlate": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "天盘，下标为地盘位"
+                    },
+                    "fourCourses": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "四课。upperDetail 为上神的遁干、天将、六亲与旬空"
+                    },
+                    "threeTransmissions": {
+                      "type": "object",
+                      "description": "三传与课体。supported 恒为 true（九宗门全覆盖）；含 initial/middle/last、courseType，涉害时另带 shehaiDepths。初中末各带 dunGan（旬遁天干）、general（所乘天将）、relative（以日干为我的六亲）与 isXunkong。"
+                    },
+                    "twelveGenerals": {
+                      "type": "object",
+                      "description": "十二天将，含贵人昼夜与顺逆"
+                    },
+                    "xunkong": {
+                      "type": "object",
+                      "nullable": true
+                    },
+                    "isFuyin": {
+                      "type": "boolean"
+                    },
+                    "isFanyin": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "日期或占时非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/qimen/chart": {
+      "post": {
+        "tags": [
+          "奇门遁甲"
+        ],
+        "summary": "奇门遁甲排盘",
+        "description": "定节气三元 → 阴阳遁与局数 → 地盘三奇六仪 → 值符值使 → 转天盘九星八门八神。口径：定局用**拆补法**（符头定元），天盘用**转盘法**。八神第五第六位取白虎、玄武（现代通行简化派）；古法阳遁用勾陈朱雀。入墓按五行墓库（木墓坤二、火土墓乾六、金墓艮八、水墓巽四）。\n格局**命名**（青龙返首、飞鸟跌穴之类）不实现 —— 那属断语层，各家出入极大。但格局所依据的**关系量**一律给出：每宫 relations 含天地盘干生克、星宫与门宫生克、门迫（宫克门）、宫内伏吟、旬空、驿马、天盘干入墓、六仪击刑 —— 那些是客观事实，不是吉凶判断。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "year": {
+                    "type": "integer"
+                  },
+                  "month": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12
+                  },
+                  "day": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 31
+                  },
+                  "hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dayGanzhi": {
+                      "type": "string"
+                    },
+                    "hourGanzhi": {
+                      "type": "string"
+                    },
+                    "xunshou": {
+                      "type": "string",
+                      "description": "旬首"
+                    },
+                    "dunYi": {
+                      "type": "string",
+                      "description": "旬首所遁之仪"
+                    },
+                    "ju": {
+                      "type": "object",
+                      "description": "节气、三元、阴阳遁、局数"
+                    },
+                    "earthPlate": {
+                      "type": "object",
+                      "description": "地盘三奇六仪，键为宫位"
+                    },
+                    "zhifu": {
+                      "type": "object",
+                      "description": "值符星及其所临之宫"
+                    },
+                    "zhishi": {
+                      "type": "object",
+                      "description": "值使门及其所落之宫"
+                    },
+                    "xunkong": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "时旬空亡的两支及其落宫。中五宫无支，落中宫的支不出现"
+                    },
+                    "yima": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "驿马及其落宫。由**日支**定，同一日各时辰不变"
+                    },
+                    "palaces": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "九宫详情，各带 relations（盘面关系量）。中五宫无门无神、恒不报伏吟（它本就不转），天禽寄坤二随天芮"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "日期或时辰非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/fengshui/bazhai": {
+      "post": {
+        "tags": [
+          "风水"
+        ],
+        "summary": "八宅命卦与八方吉凶",
+        "description": "由出生年与性别定本命卦（男 11 减、女加四，得五者男寄坤女寄艮），再以变爻法排八方游年星。给了月日则以**立春**为界定年，不是元旦；交节精确到分，故立春当天出生的要一并给出 birthHour，否则只能按当日零点算，响应里 lifeTrigram.precision 会标成 day。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "birthYear",
+                  "gender"
+                ],
+                "properties": {
+                  "birthYear": {
+                    "type": "integer"
+                  },
+                  "birthMonth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 12
+                  },
+                  "birthDay": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 31
+                  },
+                  "birthHour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23,
+                    "description": "立春当天定年靠它。不给则按当日零点算。"
+                  },
+                  "birthMinute": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 59
+                  },
+                  "gender": {
+                    "type": "string",
+                    "enum": [
+                      "male",
+                      "female"
+                    ]
+                  },
+                  "sitting": {
+                    "type": "string",
+                    "description": "坐山。卦名（坎）/ 二十四山（子、壬、乾）/ 方位（正北）/「子山午向」皆可。给了才排宅卦并论命宅相配；认不出不报错，houseResolution 会标 unresolved。"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "lifeTrigram": {
+                      "type": "object",
+                      "description": "本命卦、卦数、方位、东西四命，以及 precision（year/day/minute）与该年立春时刻"
+                    },
+                    "younian": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "八方游年星"
+                    },
+                    "auspiciousDirections": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "inauspiciousDirections": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "house": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "宅卦这一半：坐山、向、东西四宅与宅的八方游年。没给 sitting 时为 null。命卦是人的、宅卦是房子的，八宅论的正是两者相配。"
+                    },
+                    "houseResolution": {
+                      "type": "string",
+                      "enum": [
+                        "absent",
+                        "applied",
+                        "unresolved"
+                      ],
+                      "description": "坐山解析的下场。unresolved 表示填了但认不出，本次只排了命卦。"
+                    },
+                    "match": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "命宅相配：同为东四或同为西四即 matched。另给出宅之坐山方与向方在**命卦游年**里所值之星 —— 相配与否是粗判，那两个星才是细判。"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "缺出生年或性别",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/fengshui/almanac": {
+      "get": {
+        "tags": [
+          "择吉"
+        ],
+        "summary": "当日历注（宜忌、建除、值宿、冲煞、时辰吉凶、方位煞）",
+        "description": "不给日期则取服务器当日。分三层，混在一起读会看错：\n**论日** —— 建除、值宿、黄道黑道十二神、宜忌、日冲日煞、彭祖百忌、日吉神方位；\n**论时** —— hours 给十二时辰各自的天神吉凶与宜忌，「今天几点动土」只能在这一层答；\n**论方** —— directions 给太岁、岁破、三煞与流年紫白九宫盘（含五黄、二黑落宫），年界用**立春**，与年柱同界。\n宜忌与吉神凶煞是通书的既有条目，照录不加工 —— 「对你这件事意味着什么」仍不给。",
+        "parameters": [
+          {
+            "name": "year",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "month",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "day",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ganzhi": {
+                      "type": "object",
+                      "description": "年柱以立春为界，不是春节"
+                    },
+                    "lunarDate": {
+                      "type": "object"
+                    },
+                    "zhiXing": {
+                      "type": "string",
+                      "description": "建除十二神"
+                    },
+                    "xiu": {
+                      "type": "object",
+                      "description": "二十八宿及其吉凶"
+                    },
+                    "tianShen": {
+                      "type": "object",
+                      "description": "黄道黑道十二神：name 为神名、type 为黄道/黑道、luck 为吉/凶"
+                    },
+                    "yi": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "通书宜项，照录"
+                    },
+                    "ji": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "通书忌项，照录"
+                    },
+                    "chongSha": {
+                      "type": "object",
+                      "description": "日冲之支与生肖、日煞之方"
+                    },
+                    "dayPositions": {
+                      "type": "object",
+                      "description": "当日喜神、财神、福神、阳贵阴贵、日太岁所在之方"
+                    },
+                    "hours": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      },
+                      "description": "十二时辰各自的干支、时段、天神吉凶、冲煞与宜忌"
+                    },
+                    "directions": {
+                      "type": "object",
+                      "nullable": true,
+                      "description": "流年方位煞：太岁（精确到山，另给所在宫）、岁破、三煞（含劫煞灾煞岁煞三支）、入中紫白星与九宫飞星盘、五黄与二黑落宫。入中星按公式算不查表 —— 手抄的流年紫白表极易整体错位一年。"
+                    },
+                    "auspiciousGods": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "inauspiciousGods": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "pengzu": {
+                      "type": "object"
+                    },
+                    "xunkong": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "日旬空"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "日期非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/fengshui/name": {
+      "post": {
+        "tags": [
+          "姓名学"
+        ],
+        "summary": "姓名五格与三才",
+        "description": "**笔画数由调用方提供**，引擎不内置字典 —— 康熙笔画与简体笔画差异很大，部首另有独立算法（如「氵」按「水」计四画），内置一份来路不明的笔画表只会让结果看着精确、实则不可追溯。五格算法本身是确定的。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "surnameStrokes",
+                  "givenNameStrokes"
+                ],
+                "properties": {
+                  "surnameStrokes": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "description": "姓的逐字笔画"
+                  },
+                  "givenNameStrokes": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "description": "名的逐字笔画"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "grids": {
+                      "type": "object",
+                      "description": "天格、人格、地格、外格、总格"
+                    },
+                    "gridElements": {
+                      "type": "object",
+                      "description": "各格五行（按个位取）"
+                    },
+                    "sancai": {
+                      "type": "object",
+                      "description": "三才配置"
+                    },
+                    "sancaiRelations": {
+                      "type": "object",
+                      "description": "天人、人地的生克关系"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "笔画数缺失或非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/iching/ai-interpret": {
+      "post": {
+        "tags": [
+          "周易",
+          "AI"
+        ],
+        "summary": "周易 AI 解读",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/AiInterpretRequestBase"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "hexagram"
+                    ],
+                    "properties": {
+                      "hexagram": {
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "$ref": "#/components/schemas/Hexagram"
+                          }
+                        ],
+                        "description": "卦名字符串或完整卦象对象都接受。"
+                      },
+                      "userQuestion": {
+                        "type": "string"
+                      },
+                      "method": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "AI 解读文本（Markdown）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiContent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "入参缺失，或指定了不可用的 provider",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一调用方已有一个 AI 请求在处理中",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "上游 AI 供应商不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/zodiac/compatibility": {
+      "get": {
+        "tags": [
+          "星座"
+        ],
+        "summary": "两个星座的相性",
+        "parameters": [
+          {
+            "name": "primary",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "leo"
+          },
+          {
+            "name": "secondary",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "aries"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "primary": {
+                      "$ref": "#/components/schemas/ZodiacSign"
+                    },
+                    "secondary": {
+                      "$ref": "#/components/schemas/ZodiacSign"
+                    },
+                    "score": {
+                      "type": "number"
+                    },
+                    "summary": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "星座名无法识别",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/zodiac/rising": {
+      "post": {
+        "tags": [
+          "星座"
+        ],
+        "summary": "上升星座",
+        "description": "需要精确到分的出生时间、时区偏移和经纬度——上升星座对这几项都极敏感。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "birthDate",
+                  "birthTime",
+                  "timezoneOffsetMinutes",
+                  "latitude",
+                  "longitude"
+                ],
+                "properties": {
+                  "birthDate": {
+                    "type": "string",
+                    "format": "date",
+                    "example": "1990-05-20"
+                  },
+                  "birthTime": {
+                    "type": "string",
+                    "example": "14:30"
+                  },
+                  "timezoneOffsetMinutes": {
+                    "type": "integer",
+                    "minimum": -840,
+                    "maximum": 840,
+                    "example": 480
+                  },
+                  "latitude": {
+                    "type": "number",
+                    "minimum": -90,
+                    "maximum": 90
+                  },
+                  "longitude": {
+                    "type": "number",
+                    "minimum": -180,
+                    "maximum": 180
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rising": {
+                      "$ref": "#/components/schemas/ZodiacSign"
+                    },
+                    "ascendant": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "日期、时间、时区偏移或经纬度非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "无法解析出上升星座",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/zodiac/{sign}/horoscope": {
+      "get": {
+        "tags": [
+          "星座"
+        ],
+        "summary": "星座运势",
+        "parameters": [
+          {
+            "name": "sign",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "leo"
+          },
+          {
+            "name": "period",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "daily",
+                "weekly",
+                "monthly"
+              ],
+              "default": "daily"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sign": {
+                      "$ref": "#/components/schemas/ZodiacSign"
+                    },
+                    "period": {
+                      "type": "string"
+                    },
+                    "range": {
+                      "type": "string"
+                    },
+                    "generatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "horoscope": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "星座名或 period 无法识别",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/zodiac/{sign}": {
+      "get": {
+        "tags": [
+          "星座"
+        ],
+        "summary": "星座基础信息",
+        "parameters": [
+          {
+            "name": "sign",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "leo"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sign": {
+                      "$ref": "#/components/schemas/ZodiacSign"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "星座名无法识别",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/synastry/analyze": {
+      "post": {
+        "tags": [
+          "合盘"
+        ],
+        "summary": "两张八字盘的相性分析",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "personA",
+                  "personB"
+                ],
+                "properties": {
+                  "personA": {
+                    "type": "object",
+                    "properties": {
+                      "birthYear": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9999,
+                        "example": 1990
+                      },
+                      "birthMonth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 12,
+                        "example": 5
+                      },
+                      "birthDay": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 31,
+                        "example": 20
+                      },
+                      "birthHour": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 23,
+                        "example": 14
+                      },
+                      "birthMinute": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 59,
+                        "default": 0
+                      },
+                      "gender": {
+                        "type": "string",
+                        "enum": [
+                          "male",
+                          "female"
+                        ],
+                        "example": "male"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "personB": {
+                    "type": "object",
+                    "properties": {
+                      "birthYear": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9999,
+                        "example": 1990
+                      },
+                      "birthMonth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 12,
+                        "example": 5
+                      },
+                      "birthDay": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 31,
+                        "example": 20
+                      },
+                      "birthHour": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 23,
+                        "example": 14
+                      },
+                      "birthMinute": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 59,
+                        "default": 0
+                      },
+                      "gender": {
+                        "type": "string",
+                        "enum": [
+                          "male",
+                          "female"
+                        ],
+                        "example": "male"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "personA": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "dayMaster": {
+                          "type": "string"
+                        },
+                        "element": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "personB": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "dayMaster": {
+                          "type": "string"
+                        },
+                        "element": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "compatibility": {
+                      "type": "object",
+                      "description": "合盘结果。score 是把下列客观关系按 weights 折算出的粗略指标，真正可断的是各项关系本身。",
+                      "properties": {
+                        "score": {
+                          "type": "number",
+                          "description": "0..100"
+                        },
+                        "dayMasters": {
+                          "type": "object",
+                          "description": "双方日主的五行生克与互看十神（两边不对称）"
+                        },
+                        "spousePalace": {
+                          "type": "object",
+                          "description": "夫妻宫（两人日支）之间的六合/三合/半合/六冲/相刑/相害"
+                        },
+                        "crossPillars": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          },
+                          "description": "四柱交叉的合与冲，标明是哪两柱"
+                        },
+                        "elementComplement": {
+                          "type": "object",
+                          "description": "五行互补。source 为 weighted 表示用的是藏干加权而非干支个数统计"
+                        },
+                        "nayin": {
+                          "type": "object",
+                          "description": "双方日柱纳音"
+                        },
+                        "weights": {
+                          "type": "object",
+                          "description": "计分权重口径，便于调用方自定"
+                        },
+                        "insights": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "personA / personB 缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/calendar/daily": {
+      "get": {
+        "tags": [
+          "历法"
+        ],
+        "summary": "当日日柱与流日运势",
+        "description": "不带出生参数时只返回当日日柱；出生参数要么一个不给，要么给全（缺一个就是 400），给全了才会算个人化的流日分数。",
+        "parameters": [
+          {
+            "name": "birthYear",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "birthMonth",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "birthDay",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "birthHour",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "gender",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "male",
+                "female"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "date": {
+                      "type": "string"
+                    },
+                    "dailyPillar": {
+                      "type": "object"
+                    },
+                    "fortune": {
+                      "type": "object",
+                      "description": "score 是按日主五行关系与地支冲合刑害折算的粗略指标；branchRelations 给出流日地支与本命日支之间的客观关系，dayMasterRelation 给出流日天干与日主的五行关系。",
+                      "properties": {
+                        "score": {
+                          "type": "number"
+                        },
+                        "advice": {
+                          "type": "string"
+                        },
+                        "element": {
+                          "type": "string"
+                        },
+                        "branchRelations": {
+                          "type": "array",
+                          "items": {
+                            "type": "object"
+                          }
+                        },
+                        "dayMasterRelation": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "出生参数给了一部分但不完整，或日期非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/locations": {
+      "get": {
+        "tags": [
+          "地点"
+        ],
+        "summary": "真太阳时校正认得的地点",
+        "description": "这里列出的地名，传给 birthLocation 一定解析得出经纬度。不传 search 返回全表。引擎另外也接受 \"39.9,116.4\" 这种坐标串，那种写法不在本列表里。",
+        "parameters": [
+          {
+            "name": "search",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "按地名子串过滤，大小写不敏感。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Location"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,163 @@
+# 本地开发
+
+> 与代码同步。部署总览见 [deployment.md](deployment.md)，模块见 [modules.md](modules.md)。
+
+Metaphysics Engine 是一个无状态的算法能力层：Express 提供 HTTP 接口，算法逻辑全在
+`backend/services/`，没有数据库，没有前端。本文面向本地开发、二次开发和自部署前的验证。
+
+## 前置要求
+
+- Node.js >= 20（CI 覆盖 20.x 和 22.x）
+- npm >= 9
+
+就这两项。**不需要 Docker，不需要 PostgreSQL，不需要 Redis** —— 引擎是纯计算，
+Redis 只在你想验证多实例缓存共享时才用得上。
+
+跑 `./bazi doctor` 会逐项检查环境，并对每个失败项给出可直接执行的修复命令。
+
+## 安装与运行
+
+### 推荐：用 `./bazi` CLI
+
+```bash
+./bazi setup          # 装依赖 + 生成 .env
+./bazi doctor         # 环境体检，每项失败都带可执行的修复命令
+./bazi stack up       # 起引擎
+./bazi stack status   # 看当前状态
+./bazi stack down     # 停掉
+```
+
+所有命令支持 `--json`；`./bazi help --json` 是能力清单的唯一真源。
+注意：手动 `node server.js` 起的进程 CLI 管不到，之后也停不掉。
+
+### 手动步骤
+
+```bash
+npm install
+npm -C backend install
+NODE_ENV=development npm -C backend run dev   # http://127.0.0.1:4000
+```
+
+想验证 Redis 缓存共享时，再起一个本地 Redis：
+
+```bash
+docker compose up -d redis   # docker-compose.yml 里只有这一个服务
+```
+
+## 环境变量
+
+- 开发模板：[.env.example](../.env.example)
+- 生产模板：[env.production.template](../env.production.template)
+- **后端进程本身不引入 dotenv**：`node server.js` 只读取真实环境变量。
+- 用 `./bazi` 启动时，CLI 会解析仓库根的 `.env` 并注入子进程；真实 `process.env`
+  优先级高于文件（见 `tools/cli/src/core/context.mjs` 的 `buildEnv`）。
+- 手动启动或生产部署时，请在 shell 中导出，或用进程管理器/部署平台注入。
+
+开发环境**一个变量都不必填**，全部有默认值。生产环境唯一的硬性必填项是
+`DOCS_PASSWORD` —— 缺了它 `server.js` 启动即退出。`./bazi env check` 按当前
+`NODE_ENV` 校验这一点，跟服务端启动校验是同一套口径。
+
+## 测试
+
+```bash
+./bazi test              # 全部目标：cli + lint + backend + engine
+./bazi test backend      # 只跑后端
+./bazi test --fail-on-skip --json   # CI 用：有目标被跳过就退 3
+
+npm -C backend test      # 后端 Node.js test runner
+npm run test:cli         # CLI 自身的契约测试
+npm run test:engine      # 能力契约验证（要引擎在跑）
+```
+
+前三个目标不需要任何外部服务。`engine` 是唯一的例外：它拿真实引擎验证导出的工具 schema 里
+声明的可复现性确实成立（声明 `deterministic` 的命令连调两次必须一字不差），引擎没起时记
+`skipped` 而不是 `failed`。
+
+`./bazi test` 刻意**不**把 `.env` 注入测试进程 ——
+测试看到的环境应该尽量接近 CI 里那个干净的环境，否则「本机能过、CI 过不了」很难查。
+
+> `bazi test` 的目标未就绪时会记 `skipped` 并**照样返回 0**。永远读 `summary.skipped`，
+> 别只看退出码；要让「什么都没跑」变成硬失败就加 `--fail-on-skip`。
+
+## 常用脚本
+
+| 命令                                      | 作用                                                                                            |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `npm -C backend run generate:openapi`     | 重新生成 `docs/openapi.json`                                                                    |
+| `npm run lint`                            | 根级 ESLint                                                                                     |
+| `npm run format` / `npm run format:check` | Prettier                                                                                        |
+| `npm -C backend run test:coverage`        | 覆盖率报告（`test:coverage:gate` 是 CI 那道门槛，需 Node 22.8+）                                |
+| `./scripts/check-docs.sh`                 | 文档里的链接、npm 脚本、`./bazi` 命令必须真的存在；每条 OpenAPI 路径必须在 `docs/api.md` 里出现 |
+| `./scripts/check-env-template.sh`         | 生产模板与 compose 透传覆盖代码读取的每个变量                                                   |
+| `./scripts/check-repo-artifacts.sh`       | 防止构建产物/大文件被提交                                                                       |
+| `./scripts/verify-deployment.sh`          | 打一个已部署实例做端到端校验（`API_BASE_URL=...`）                                              |
+
+改了 `backend/services/apiSchema.service.js` 之后**必须**重新生成 OpenAPI 快照，
+否则 CI 会因为 `git diff --exit-code -- docs/openapi.json` 失败。
+
+## 代码结构提示
+
+- 算法与业务逻辑集中在 `backend/services/*.service.js`，分工见 [modules.md](modules.md)
+- HTTP 入口在 `backend/routes/*`，只做参数编解码
+- 对外接口契约在 `docs/openapi.json`，由 `apiSchema.service.js` 生成，运行时挂在 `/api-docs`
+- 架构见 [architecture.md](architecture.md)；配置见 [configuration.md](configuration.md)
+- **算法语义边界**（真太阳时、晚子时、闰月、节气交接）见
+  [.claude/skills/bazi-cli/SKILL.md](../.claude/skills/bazi-cli/SKILL.md) ——
+  那里每一条都是「错了不会报错」的坑，改算法之前先读
+
+## 开发约定
+
+- 默认 CORS 白名单取自 `CORS_ALLOWED_ORIGINS`；非生产环境额外放行 `http://localhost:3000` 与 `http://127.0.0.1:3000`
+- 服务端到服务端、Agent 调用不带 Origin 头，不受 CORS 影响
+- AI Provider 根据密钥自动选择；无密钥时为 `mock`
+- 修改/新增 API 时同步更新 `docs/api.md` 和 OpenAPI 快照
+- 改了行为、配置或部署方式时按 [README.md](README.md) 的同步表改对应文档，并跑 `./scripts/check-docs.sh`
+
+## 调试
+
+```bash
+curl http://localhost:4000/live                  # 只看进程
+curl http://localhost:4000/health                # 含依赖
+curl http://localhost:4000/api/ready             # 就绪
+curl http://localhost:4000/api/system/cache-status
+./bazi stack logs --tail 60                      # 引擎日志（pino JSON）
+```
+
+运行态都在 `.tmp/cli/` 下（pidfile、日志），已被 `.gitignore` 覆盖，可以整个删掉重来。
+
+## 常见问题
+
+### 引擎起不来
+
+先看 `./bazi stack logs --tail 60`。CLI 在启动失败时会把日志压成一条诊断返回，
+认得出的失败特征（端口占用、生产模式缺 `DOCS_PASSWORD`、依赖缺失）会直接翻译成下一步命令。
+
+### 端口 4000 被占用
+
+`./bazi stack status` 会报 `foreign` —— 端口上有进程，但不是 bazi 起的。
+CLI 刻意拒绝接管也拒绝 kill，因为按端口杀进程会误伤别的终端或另一个 worktree。
+
+### Redis 连不上
+
+开发环境不配 Redis 完全没问题，排盘缓存退化成进程内缓存，结果一样。
+配了但连不上时 `./bazi doctor` 会报 fail，把 `.env` 里的 `REDIS_URL` 清空即可。
+
+### AI 功能返回 mock 数据
+
+检查 `OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY` 是否配置。未配置时 provider 为 `mock`。
+`GET /api/ai/providers` 能看到当前生效的是哪个。
+
+## 改动规范与质量门槛
+
+完整约定见 [CONTRIBUTING.md](../CONTRIBUTING.md)：项目边界、算法改动的判据、
+加一门新术数要动哪几处、本地质量门槛、提交规范、改动自查清单，
+以及哪些改动因为边界原因不做。文档地图见 [README.md](README.md)。
+
+几条最容易踩的：
+
+- 改了 `backend/services/apiSchema.service.js` 必须重新生成并提交 `docs/openapi.json`
+- 改算法要补测试，且测试样例得有典籍或流派依据
+- 涉及流派选择的地方就地注明，并同步进
+  [.claude/skills/bazi-cli/SKILL.md](../.claude/skills/bazi-cli/SKILL.md)
+- 改 CLI 本身时先读 SKILL.md 的「要改 CLI 本身的时候」那一节 —— 那里列的不是风格建议，
+  是契约测试会当场拦下来的硬约束

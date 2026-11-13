@@ -1,0 +1,57 @@
+# 目录型规则（结尾带 /、中间不带 /）在任意层级都生效，所以一条顶多条：node_modules/
+# 覆盖仓库根和 backend/ 下的。CI 里另有 scripts/check-repo-artifacts.sh 兜底，
+# 防止 git add -f 绕过。
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+.tmp/
+coverage/
+*.tgz
+
+# 本地环境与系统噪音。排除 .env* 并显式保留模板文件。
+.env*
+!.env.example
+!.env*.example
+*.pem
+*.key
+*.session*
+tdata/
+*.log
+.DS_Store
+.eslintcache
+.npm/
+.idea/
+.vscode/
+
+# 数据库备份产物。scripts/backup-db.sh 默认写到 backups/，单个 dump 轻松上百 MB，
+# 而且里面是明文业务数据——比体积更要紧的是它不该进版本库。
+backups/
+*.dump
+*.sql.gz
+
+# 数据库状态：开发用 SQLite + e2e 用的 PostgreSQL 数据目录
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+.pgdata-e2e/
+
+# 手工备份与合并冲突残留。历史里躺着两个版本的 backend/server.js.backup（各 185KB）——
+# 重构前"先复制一份保平安"留下的，源文件早已面目全非，副本却跟着每次 clone 一起下发。
+# 备份该由 git 负责，不由文件名负责；.orig/.rej 同理，是冲突解完忘了删的临时物。
+# 注意这些是文件名通配，不带目录斜杠，所以在任意层级都生效。
+*.backup
+*.bak
+*.orig
+*.rej
+*~
+
+# 测试与巡检产物。历史上端到端巡检的整页 PNG 证据（单张 3~6MB）被提交进 verification/，
+# 把仓库撑到 735MB。相关套件已随前端一起删除，但这些规则保留：再有人引入类似产物时，
+# 默认就是被忽略的，不用等到仓库又胖了才发现。
+verification/
+test-results/
+playwright-report/
+.lighthouseci/

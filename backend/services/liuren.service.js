@@ -1,0 +1,640 @@
+/**
+ * 大六壬起课层。
+ *
+ * 起课链条：定月将 → 月将加时得天地盘 → 日干寄宫 → 四课 → 三传 → 十二天将。
+ *
+ * 三传九宗门全备：贼克（元首/重审）、比用（知一）、涉害（含见机/察微）、遥克（蒿矢/弹射）、
+ * 昴星（虎视/冬蛇掩目）、别责、八专、伏吟（自任/自信）、返吟（无亲）。
+ *
+ * 取传次第不是可以随意调换的：八专「不取遥克」，故它必须排在遥克之前；
+ * 别责与昴星则在遥克之后，按四课是否缺一区分。次第错了，三传照样出得来，
+ * 只是课体判错 —— 而课体是后面所有断语的依据。
+ */
+
+import { Solar } from 'lunar-javascript';
+
+import {
+  BRANCHES,
+  STEMS,
+  BRANCH_PUNISH_TARGET,
+  SELF_PUNISH_BRANCHES,
+  MENG_BRANCHES,
+  ZHONG_BRANCHES,
+  YIMA_BY_GROUP,
+  STEM_COMBINATIONS,
+  BRANCH_TRIPLE_COMBINATIONS,
+  SEXAGENARY_CYCLE,
+} from '../constants/ganzhi.js';
+import { BRANCHES_MAP, STEMS_MAP } from '../constants/stems.js';
+import { resolveDayForHour } from '../utils/civilDate.js';
+import { getElementRelation } from './bazi.service.js';
+import { getXunkong } from './ganzhi.service.js';
+import { resolveSolarTerm } from './jieqi.service.js';
+import {
+  MONTH_GENERALS,
+  QI_TO_MONTH_GENERAL,
+  STEM_LODGING,
+  TWELVE_GENERALS,
+  NOBLE_BY_DAY_STEM,
+  DAY_TIME_BRANCHES,
+  COURSE_TYPES,
+} from '../constants/liuren.js';
+import { withSchool } from '../constants/rulings.js';
+
+const normalize12 = (value) => ((value % 12) + 12) % 12;
+const branchIndex = (branch) => BRANCHES.indexOf(branch);
+const elementOf = (branch) => BRANCHES_MAP[branch]?.element || null;
+
+/** 时辰地支。子时含 23 时。 */
+export const getHourBranch = (hour) => BRANCHES[Math.floor((Number(hour) + 1) / 2) % 12];
+
+/**
+ * 定月将：取不晚于占日的最近一个**中气**，其对应之将即为当月月将。
+ * 用节换将是另一派，本模块取中气派。
+ */
+export const resolveMonthGeneral = (year, month, day, hour = 0, minute = 0) => {
+  const qi = resolveSolarTerm({ year, month, day, hour, minute }, { midQiOnly: true });
+
+  // 中气交在占时之后而未给时辰时，退到上一个中气 —— 宁可慢一步换将，不可早换
+  const branch = qi ? QI_TO_MONTH_GENERAL[qi.name] : '子';
+  return {
+    branch,
+    ...MONTH_GENERALS[branch],
+    // 实际所处中气。与常量里的 afterQi 恒等，列出来是为了能直接核对换将时点。
+    // 交气时刻是东八区墙钟，不是某个瞬时的 UTC 表示，故不走 toISOString
+    currentMidQi: qi ? qi.name : null,
+    afterQiAt: qi ? qi.iso : null,
+    afterQiDate: qi ? qi.iso.slice(0, 10) : null,
+  };
+};
+
+/**
+ * 月将加时得天盘：把月将安在占时所在的地盘位上，其余顺排。
+ * 返回数组下标即地盘位（0 = 子），值为该位之上的天盘支。
+ */
+export const buildHeavenPlate = (monthGeneralBranch, hourBranch) => {
+  const generalIdx = branchIndex(monthGeneralBranch);
+  const hourIdx = branchIndex(hourBranch);
+  if (generalIdx === -1 || hourIdx === -1) return null;
+  return BRANCHES.map((_, earthIdx) => BRANCHES[normalize12(generalIdx + earthIdx - hourIdx)]);
+};
+
+/** 取某地支之上所乘的天盘支。 */
+const above = (heavenPlate, branch) => heavenPlate[branchIndex(branch)];
+
+/**
+ * 四课。
+ * 一课：日干寄宫及其上神；二课：一课上神及其上神；
+ * 三课：日支及其上神；四课：三课上神及其上神。
+ */
+export const buildFourCourses = (heavenPlate, dayStem, dayBranch) => {
+  const lodging = STEM_LODGING[dayStem];
+  if (!lodging || !heavenPlate) return null;
+
+  /**
+   * 第一课的下神是**日干本身**，寄宫只是它在地盘上的落脚处，用来取上神。
+   * 判克因此以日干五行论：乙日干上神未，是乙木克未土（下贼上），不是辰土对未土无克。
+   * 乙（寄辰土）丁（寄未土）戊（寄巳火）辛（寄戌土）癸（寄丑土）五干的寄宫五行与本干不同，
+   * 此前按寄宫地支五行判，这五种日干 —— 一半的日子 —— 第一课的克应整层错，课体与初传随之错。
+   * 外部例课：丁丑日子时申将，四课「丁和卯，卯生丁，二者不克」，正解元首课初传巳；
+   * 旧算法把卯木克未土判成上克下，排成涉害课初传卯。
+   */
+  const first = {
+    lower: lodging,
+    lowerStem: dayStem,
+    upper: above(heavenPlate, lodging),
+    basis: 'stemLodging',
+  };
+  const second = { lower: first.upper, upper: above(heavenPlate, first.upper), basis: 'first' };
+  const third = { lower: dayBranch, upper: above(heavenPlate, dayBranch), basis: 'dayBranch' };
+  const fourth = { lower: third.upper, upper: above(heavenPlate, third.upper), basis: 'third' };
+
+  return [first, second, third, fourth].map((course, index) => ({
+    index: index + 1,
+    ...course,
+    upperElement: elementOf(course.upper),
+    lowerElement: course.lowerStem
+      ? STEMS_MAP[course.lowerStem]?.element || null
+      : elementOf(course.lower),
+  }));
+};
+
+/** 上克下为「克」，下克上为「贼」。贼较克为急，故先取贼。 */
+const classifyCourse = (course) => {
+  const relation = getElementRelation(course.lowerElement, course.upperElement);
+  if (relation === 'ControlledBy') return 'ke'; // 上克下
+  if (relation === 'Controls') return 'zei'; // 下贼上
+  return null;
+};
+
+/** 与日干阴阳相同者为「比」。比用法据此取舍。 */
+const isSamePolarity = (branch, dayStem) => {
+  const stemPolarity = STEMS_MAP[dayStem]?.polarity;
+  const branchPolarity = BRANCHES_MAP[branch]?.polarity;
+  return stemPolarity && branchPolarity && stemPolarity === branchPolarity;
+};
+
+/**
+ * 涉害深浅。
+ *
+ * 口径（本模块选定，与「直取孟仲季」那一派不同，后者不归家、直接数孟上贼克）：
+ * - 路径：自天盘之支所乘的地盘位起，**顺行**归返本家，沿途所经地盘诸支即为「所涉」
+ * - 计数随课体而变：
+ *   - 下贼上者，数上神**受**地盘之神所克的次数
+ *   - 上克下者，数上神**所克**的地盘之神的个数
+ *   这一条容易被忽略而一律按受克计 —— 那样上克下的一组会算出与本意相反的深浅。
+ *
+ * 数多者涉害深，取为初传。
+ */
+export const calculateShehaiDepth = (heavenBranch, heavenPlate, { mode = 'received' } = {}) => {
+  const ridingIdx = heavenPlate.indexOf(heavenBranch);
+  const homeIdx = branchIndex(heavenBranch);
+  if (ridingIdx === -1 || homeIdx === -1) return 0;
+
+  let depth = 0;
+  let cursor = ridingIdx;
+  while (cursor !== homeIdx) {
+    const earthBranch = BRANCHES[cursor];
+    const relation = getElementRelation(elementOf(earthBranch), elementOf(heavenBranch));
+    // received：地盘之支克我；inflicted：我克地盘之支
+    const hit = mode === 'received' ? relation === 'Controls' : relation === 'ControlledBy';
+    if (hit) depth += 1;
+    cursor = normalize12(cursor + 1);
+  }
+  return depth;
+};
+
+const isYangDay = (dayStem) => STEMS_MAP[dayStem]?.polarity === '+';
+
+/** 干上神（一课上神）与支上神（三课上神）。 */
+const stemUpper = (courses) => courses[0].upper;
+const branchUpper = (courses) => courses[2].upper;
+
+/**
+ * 涉害法及其两个分支：深浅相等时先取孟神（见机），无孟取仲神（察微），
+ * 仍不能决则阳日取干上神、阴日取支上神。
+ */
+const resolveShehai = (candidates, heavenPlate, dayStem, courses, mode = 'received') => {
+  const scored = candidates.map((branch) => ({
+    branch,
+    depth: calculateShehaiDepth(branch, heavenPlate, { mode }),
+  }));
+  const maxDepth = Math.max(...scored.map((s) => s.depth));
+  const deepest = scored.filter((s) => s.depth === maxDepth);
+  if (deepest.length === 1) {
+    return { initial: deepest[0].branch, courseType: COURSE_TYPES.shehai, depths: scored };
+  }
+
+  /**
+   * 「孟深仲浅季当休」看的是候选上神**所临的地盘位**是四孟还是四仲（临孟者为见机、临仲者为察微），
+   * 不是候选支本身属孟属仲。此前按候选支自身判：候选恒是天盘之支，与它压在哪一位无关，
+   * 于是见机取错、察微与复等两支在全部 8640 种日/将/时组合里一次都走不到。
+   */
+  const earthUnder = (branch) => BRANCHES[heavenPlate.indexOf(branch)];
+  const meng = deepest.filter((s) => MENG_BRANCHES.includes(earthUnder(s.branch)));
+  if (meng.length === 1) {
+    return { initial: meng[0].branch, courseType: COURSE_TYPES.jianji, depths: scored };
+  }
+  const zhong = deepest.filter((s) => ZHONG_BRANCHES.includes(earthUnder(s.branch)));
+  if (zhong.length === 1) {
+    return { initial: zhong[0].branch, courseType: COURSE_TYPES.chawei, depths: scored };
+  }
+
+  // 孟仲皆不能决：阳日取干上神、阴日取支上神，课体为**复等课**。
+  // 此前这一支仍打「见机/察微」的名 —— 那两个课体的成立条件是「取到了孟/仲」，
+  // 取不到还挂它们的名，等于把课体报错，而课体是后面全部断语的依据。
+  const fallback = isYangDay(dayStem) ? stemUpper(courses) : branchUpper(courses);
+  return {
+    initial: fallback,
+    courseType: COURSE_TYPES.fudeng,
+    depths: scored,
+  };
+};
+
+/** 伏吟、返吟以外的常规课，中末传皆递取上神。 */
+const buildByUpper = (initial, heavenPlate, courseType, extra = {}) => {
+  const middle = above(heavenPlate, initial);
+  const last = above(heavenPlate, middle);
+  return {
+    supported: true,
+    courseType,
+    initial: { branch: initial, element: elementOf(initial) },
+    middle: { branch: middle, element: elementOf(middle) },
+    last: { branch: last, element: elementOf(last) },
+    ...extra,
+  };
+};
+
+/** 显式指定三传（昴星、别责、八专、伏吟、返吟用）。 */
+const buildExplicit = (initial, middle, last, courseType, extra = {}) => ({
+  supported: true,
+  courseType,
+  initial: { branch: initial, element: elementOf(initial) },
+  middle: { branch: middle, element: elementOf(middle) },
+  last: { branch: last, element: elementOf(last) },
+  ...extra,
+});
+
+/**
+ * 从贼克/遥克候选里定初传：独一直接取；多课先比用；俱比/俱不比再涉害。
+ * 候选上神去重，避免同一上神出现两课时被误推进见机/察微。
+ */
+const pickInitialFromCandidates = (candidates, heavenPlate, dayStem, courses, shehaiMode) => {
+  if (!candidates.length) return null;
+  // 两课同一上神视为一课（八专日一三课、二四课相同）：先按上神去重，再论独一与比用。
+  // 此前去重放在比用之后，去重后只剩一支仍交给涉害，报出「只有一个候选的涉害课」。
+  const uniqueUppers = [...new Set(candidates.map((c) => c.upper))];
+  if (uniqueUppers.length === 1) {
+    return { initial: uniqueUppers[0], courseType: null, shehaiDepths: null };
+  }
+  const matched = uniqueUppers.filter((upper) => isSamePolarity(upper, dayStem));
+  if (matched.length === 1) {
+    return { initial: matched[0], courseType: COURSE_TYPES.zhiyi, shehaiDepths: null };
+  }
+  // 俱比只在比用命中的集合上涉害；俱不比才回退到全体候选
+  const pool = matched.length ? matched : uniqueUppers;
+  const resolved = resolveShehai(pool, heavenPlate, dayStem, courses, shehaiMode);
+  return {
+    initial: resolved.initial,
+    courseType: resolved.courseType,
+    shehaiDepths: resolved.depths,
+  };
+};
+
+/**
+ * 伏吟：天地盘重合。有克依贼克（含比用/涉害）定初传，无克则阳日取干上神（自任）、
+ * 阴日取支上神（自信）。中末传递取其刑；遇自刑之支则颠倒日辰改取另一上神。
+ *
+ * 伏吟有克只在一课出现：二三四课上下同支必无克，一课是日干对干上神（寄宫支）——
+ * 乙木克辰土、丑土克癸水，乙癸两日伏吟即有克。此前一课按寄宫支判克，伏吟四课全成「同」，
+ * 有克这一支永远走不到，乙癸日伏吟全部误报自任/自信。
+ */
+const resolveFuyin = (courses, heavenPlate, dayStem) => {
+  const zei = courses.filter((c) => classifyCourse(c) === 'zei');
+  const ke = courses.filter((c) => classifyCourse(c) === 'ke');
+  const primary = zei.length ? zei : ke;
+  const yang = isYangDay(dayStem);
+
+  let initial;
+  let courseType;
+  if (primary.length) {
+    const picked = pickInitialFromCandidates(
+      primary,
+      heavenPlate,
+      dayStem,
+      courses,
+      zei.length ? 'received' : 'inflicted'
+    );
+    initial = picked.initial;
+    courseType = COURSE_TYPES.fuyinKe;
+  } else {
+    initial = yang ? stemUpper(courses) : branchUpper(courses);
+    courseType = yang ? COURSE_TYPES.ziren : COURSE_TYPES.zixin;
+  }
+
+  // 中传取初传之刑；初传自刑则「颠倒日辰」——初传来自干上则改取支上神，来自支上则改取干上神。
+  // 无克时初传阳日干上、阴日支上，与按阴阳日判等价；有克时初传来源由克课决定，
+  // 乙日（阴）初传辰来自干上，改取的必须是支上神 —— 按阴阳日会取回干上神辰。
+  let middle = BRANCH_PUNISH_TARGET[initial];
+  if (SELF_PUNISH_BRANCHES.includes(initial)) {
+    middle = initial === stemUpper(courses) ? branchUpper(courses) : stemUpper(courses);
+  }
+  // 末传取中传之刑；中传自刑则取其冲
+  let last = BRANCH_PUNISH_TARGET[middle];
+  if (SELF_PUNISH_BRANCHES.includes(middle)) {
+    last = BRANCHES[normalize12(branchIndex(middle) + 6)];
+  }
+
+  return buildExplicit(initial, middle, last, courseType, { note: '伏吟：中末传递取其刑' });
+};
+
+/**
+ * 返吟：天地盘全冲。有克依贼克（含比用/涉害）；无克为无亲课，取驿马为初传、
+ * 支上神为中传、干上神为末传。
+ */
+const resolveFanyin = (courses, heavenPlate, dayStem, dayBranch) => {
+  const zei = courses.filter((c) => classifyCourse(c) === 'zei');
+  const ke = courses.filter((c) => classifyCourse(c) === 'ke');
+  const primary = zei.length ? zei : ke;
+
+  if (primary.length) {
+    const picked = pickInitialFromCandidates(
+      primary,
+      heavenPlate,
+      dayStem,
+      courses,
+      zei.length ? 'received' : 'inflicted'
+    );
+    return buildByUpper(picked.initial, heavenPlate, COURSE_TYPES.fanyinKe, {
+      shehaiDepths: picked.shehaiDepths || undefined,
+    });
+  }
+
+  const yimaEntry = YIMA_BY_GROUP.find((g) => g.branches.includes(dayBranch));
+  const yima = yimaEntry ? yimaEntry.yima : branchUpper(courses);
+  return buildExplicit(yima, branchUpper(courses), stemUpper(courses), COURSE_TYPES.wuqin, {
+    note: '返吟无克，取驿马为初传',
+  });
+};
+
+/**
+ * 取三传，依九宗门次第。
+ *
+ * 伏吟返吟因天地盘特殊，先行判定；其余按
+ * 贼克 → 比用 → 涉害 → 八专 → 遥克 → 别责 / 昴星 逐层排除。
+ * （八专「不取遥克」，故必须排在遥克之前。）
+ */
+export const deriveThreeTransmissions = (courses, heavenPlate, dayStem, options = {}) => {
+  const { isFuyin = false, isFanyin = false, dayBranch = null } = options;
+
+  if (isFuyin) return resolveFuyin(courses, heavenPlate, dayStem);
+  if (isFanyin) return resolveFanyin(courses, heavenPlate, dayStem, dayBranch);
+
+  const zei = courses.filter((c) => classifyCourse(c) === 'zei');
+  const ke = courses.filter((c) => classifyCourse(c) === 'ke');
+
+  // 贼克法：先取下贼上，无贼则取上克下
+  const primary = zei.length ? zei : ke;
+  const typeWhenSingle = zei.length ? COURSE_TYPES.zhongshen : COURSE_TYPES.yuanshou;
+
+  if (primary.length === 1) {
+    return buildByUpper(primary[0].upper, heavenPlate, typeWhenSingle);
+  }
+
+  if (primary.length > 1) {
+    const picked = pickInitialFromCandidates(
+      primary,
+      heavenPlate,
+      dayStem,
+      courses,
+      zei.length ? 'received' : 'inflicted'
+    );
+    // 比用独一时 courseType 为 zhiyi；涉害时用涉害系课体
+    const courseType = picked.courseType || COURSE_TYPES.zhiyi;
+    return buildByUpper(picked.initial, heavenPlate, courseType, {
+      shehaiDepths: picked.shehaiDepths || undefined,
+    });
+  }
+
+  // 四课去重看课体：八专为「四课备二」，别责为「四课缺一（只三课）」。
+  // 要按上下神成对去重 —— 只看上神会把「上神同而下神异」误判成缺课。
+  const distinctCourses = new Set(courses.map((c) => `${c.upper}/${c.lower}`));
+  const yang = isYangDay(dayStem);
+
+  // 八专：日干寄宫与日支同位（或四课备二）。此门**不取遥克**，故必须排在遥克之前判定。
+  // 判定用 STEM_LODGING，不用手写日表（旧表乙卯/戊戌/辛酉是错的）。
+  const isBazhuanDay = STEM_LODGING[dayStem] === dayBranch;
+  if (isBazhuanDay || distinctCourses.size === 2) {
+    // 阳日自干上神顺数三位，阴日自第四课上神逆数三位（含本位计一，故步长为 2）
+    const base = yang ? stemUpper(courses) : courses[3].upper;
+    const step = yang ? 2 : -2;
+    const initial = BRANCHES[normalize12(branchIndex(base) + step)];
+    return buildExplicit(initial, stemUpper(courses), stemUpper(courses), COURSE_TYPES.bazhuan, {
+      note: '八专：中末传皆取干上神；此门不取遥克',
+    });
+  }
+
+  // 遥克法：四课无克，先取上神遥克日干（蒿矢），次取日干遥克上神（弹射）
+  const stemElement = STEMS_MAP[dayStem]?.element;
+  const shooters = courses.filter(
+    (c) => getElementRelation(stemElement, c.upperElement) === 'ControlledBy'
+  );
+  const targets = courses.filter(
+    (c) => getElementRelation(stemElement, c.upperElement) === 'Controls'
+  );
+  const remote = shooters.length ? shooters : targets;
+  const remoteType = shooters.length ? COURSE_TYPES.haoshi : COURSE_TYPES.tanshe;
+
+  if (remote.length === 1) {
+    return buildByUpper(remote[0].upper, heavenPlate, remoteType);
+  }
+  if (remote.length > 1) {
+    const picked = pickInitialFromCandidates(
+      remote,
+      heavenPlate,
+      dayStem,
+      courses,
+      shooters.length ? 'received' : 'inflicted'
+    );
+    return buildByUpper(picked.initial, heavenPlate, remoteType, {
+      shehaiDepths: picked.shehaiDepths || undefined,
+      /** 多神遥克时按比用/涉害取舍，课体仍名蒿矢/弹射；取舍依据留在这里。 */
+      selection: picked.courseType?.key || null,
+    });
+  }
+
+  // 无克亦无遥克：四课缺一（只三课）用别责，四课俱全用昴星。
+  if (distinctCourses.size === 3) {
+    // 别责：阳日取日干之合的寄宫上神；阴日「支前三合」——日支三合局里顺行的**下一支**
+    // （丑→巳、酉→丑、巳→酉；辰→申），「前」指顺行方向，与「日前一位」同义，不是逆数
+    let initial;
+    if (yang) {
+      const combo = STEM_COMBINATIONS.find(({ pair }) => pair.includes(dayStem));
+      const partner = combo ? combo.pair.find((s) => s !== dayStem) : null;
+      const lodging = partner ? STEM_LODGING[partner] : null;
+      initial = lodging ? above(heavenPlate, lodging) : stemUpper(courses);
+    } else {
+      const triple = BRANCH_TRIPLE_COMBINATIONS.find((t) => t.branches.includes(options.dayBranch));
+      if (triple) {
+        const idx = triple.branches.indexOf(options.dayBranch);
+        initial = triple.branches[(idx + 1) % 3];
+      } else {
+        initial = branchUpper(courses);
+      }
+    }
+    return buildExplicit(initial, stemUpper(courses), stemUpper(courses), COURSE_TYPES.bieze, {
+      note: '别责：中末传皆取干上神',
+    });
+  }
+
+  // 昴星：**阳仰阴俯**。阳日仰视，自地盘酉往上取所乘之天盘神（虎视转蓬）；
+  // 阴日俯视，取天盘酉所压之地盘支（冬蛇掩目）。两者取反会得到完全不同的初传。
+  if (yang) {
+    const initial = above(heavenPlate, '酉');
+    return buildExplicit(initial, branchUpper(courses), stemUpper(courses), COURSE_TYPES.hushi, {
+      note: '昴星阳日：中传支上神、末传干上神',
+    });
+  }
+  const initial = BRANCHES[heavenPlate.indexOf('酉')];
+  return buildExplicit(initial, stemUpper(courses), branchUpper(courses), COURSE_TYPES.dongshe, {
+    note: '昴星阴日：中传干上神、末传支上神',
+  });
+};
+
+/**
+ * 十二天将：贵人分昼夜落于地盘，贵人临亥子丑寅卯辰则顺行，临巳午未申酉戌则逆行。
+ * 返回数组下标为地盘位，值为该位所临之将。
+ *
+ * 贵人取法的流派分歧（庚归哪一组）见 constants/liuren.js 的 NOBLE_BY_DAY_STEM。
+ */
+export const buildTwelveGenerals = (dayStem, hourBranch, heavenPlate) => {
+  const noble = NOBLE_BY_DAY_STEM[dayStem];
+  if (!noble || !heavenPlate) return null;
+  const isDaytime = DAY_TIME_BRANCHES.includes(hourBranch);
+  const nobleBranch = isDaytime ? noble.day : noble.night;
+
+  // 贵人所乘之天盘支决定其落于哪个地盘位
+  const nobleEarthIndex = heavenPlate.findIndex((heaven) => heaven === nobleBranch);
+  if (nobleEarthIndex === -1) return null;
+
+  // 顺逆看贵人所临地盘位：亥子丑寅卯辰顺，巳午未申酉戌逆
+  const forwardBranches = ['亥', '子', '丑', '寅', '卯', '辰'];
+  const forward = forwardBranches.includes(BRANCHES[nobleEarthIndex]);
+
+  const plate = new Array(12);
+  TWELVE_GENERALS.forEach((general, offset) => {
+    const idx = normalize12(nobleEarthIndex + (forward ? offset : -offset));
+    plate[idx] = general;
+  });
+
+  return {
+    isDaytime,
+    nobleBranch,
+    nobleEarthBranch: BRANCHES[nobleEarthIndex],
+    forward,
+    plate,
+  };
+};
+
+/**
+ * 旬遁：三传各支在日干支所属之旬中所配之天干。
+ *
+ * 断课离不开遁干 —— 三传只有支时，「初传克日干」这类判断根本无从下手。
+ * 落在旬空两支上的传取不到遁干（那一旬里根本没有那两支），返回 null，
+ * 这正好与 `isXunkong` 互为印证，不必另行判断。
+ */
+export const getDunGan = (dayGanzhi, branch) => {
+  const index = SEXAGENARY_CYCLE.indexOf(dayGanzhi);
+  if (index === -1) return null;
+  const head = Math.floor(index / 10) * 10;
+  for (let offset = 0; offset < 10; offset += 1) {
+    const ganzhi = SEXAGENARY_CYCLE[head + offset];
+    if (ganzhi[1] === branch) return ganzhi[0];
+  }
+  return null;
+};
+
+/**
+ * 六亲：以**日干**为我，看目标支的五行与我的生克。
+ * 六爻以本宫五行为我，六壬以日干为我 —— 两者判据不同，不要互相代入。
+ */
+const SIX_RELATIVES = {
+  Same: { key: 'xiongdi', cn: '兄弟' },
+  Generates: { key: 'zisun', cn: '子孙' },
+  GeneratedBy: { key: 'fumu', cn: '父母' },
+  Controls: { key: 'qicai', cn: '妻财' },
+  ControlledBy: { key: 'guangui', cn: '官鬼' },
+};
+
+export const getLiurenRelative = (dayStem, branch) => {
+  const me = STEMS_MAP[dayStem]?.element;
+  const target = elementOf(branch);
+  if (!me || !target) return null;
+  return SIX_RELATIVES[getElementRelation(me, target)] || null;
+};
+
+/**
+ * 给三传与四课的上神挂上断课所需的原料：遁干、所乘天将、六亲、旬空。
+ *
+ * 天将乘的是**天盘之支**，而 generals.plate 的下标是**地盘位** ——
+ * 必须先把该支在天盘上找出来，再取它所压的那个地盘位上的将。
+ * 直接拿支的地支序去取 plate 会得到另一个将，且不会报错。
+ */
+const decorateBranch = (branch, { dayGanzhi, dayStem, heavenPlate, generals, xunkong }) => {
+  if (!branch) return null;
+  const earthIndex = heavenPlate ? heavenPlate.findIndex((heaven) => heaven === branch) : -1;
+  return {
+    branch,
+    element: elementOf(branch),
+    dunGan: getDunGan(dayGanzhi, branch),
+    relative: getLiurenRelative(dayStem, branch),
+    general: earthIndex === -1 ? null : generals?.plate?.[earthIndex] || null,
+    earthBranch: earthIndex === -1 ? null : BRANCHES[earthIndex],
+    isXunkong: !!xunkong?.branches?.includes(branch),
+  };
+};
+
+/**
+ * 起一课完整六壬盘。
+ *
+ * @param {object} input
+ * @param {number} input.year 占日公历年
+ * @param {number} input.month 占日公历月
+ * @param {number} input.day 占日公历日
+ * @param {number} input.hour 占时（0-23）
+ */
+export const castLiurenChart = ({ year, month, day, hour, minute = 0 }) => {
+  if (![year, month, day].every((v) => Number.isInteger(Number(v)))) return null;
+
+  const h = Number(hour) || 0;
+  const mi = Number(minute) || 0;
+  // 23 点入次日子时：日干支按次日，与时支同属一个子时；月将仍按实际占时中气。
+  const dayCivil = resolveDayForHour(Number(year), Number(month), Number(day), h);
+  const solar = Solar.fromYmd(dayCivil.year, dayCivil.month, dayCivil.day);
+  const lunar = solar.getLunar();
+  const dayGanzhi = lunar.getDayInGanZhi();
+  const dayStem = dayGanzhi[0];
+  const dayBranch = dayGanzhi[1];
+
+  const hourBranch = getHourBranch(h);
+  const monthGeneral = resolveMonthGeneral(Number(year), Number(month), Number(day), h, mi);
+  const heavenPlate = buildHeavenPlate(monthGeneral.branch, hourBranch);
+  if (!heavenPlate) return null;
+
+  const courses = buildFourCourses(heavenPlate, dayStem, dayBranch);
+  if (!courses) return null;
+
+  // 伏吟：月将与占时同，天地盘重合；返吟：月将与占时相冲，天地盘全冲
+  const isFuyin = monthGeneral.branch === hourBranch;
+  const isFanyin = normalize12(branchIndex(monthGeneral.branch) - branchIndex(hourBranch)) === 6;
+
+  const transmissions = deriveThreeTransmissions(courses, heavenPlate, dayStem, {
+    isFuyin,
+    isFanyin,
+    dayBranch,
+  });
+  const generals = buildTwelveGenerals(dayStem, hourBranch, heavenPlate);
+  const xunkong = getXunkong(dayGanzhi);
+
+  // 三传与四课上神挂遁干、天将、六亲、旬空 —— 缺了这些，三传只是三个字
+  const context = { dayGanzhi, dayStem, heavenPlate, generals, xunkong };
+  const decoratedTransmissions = transmissions
+    ? {
+        ...transmissions,
+        initial: decorateBranch(transmissions.initial?.branch, context),
+        middle: decorateBranch(transmissions.middle?.branch, context),
+        last: decorateBranch(transmissions.last?.branch, context),
+      }
+    : transmissions;
+  const decoratedCourses = courses.map((course) => ({
+    ...course,
+    upperDetail: decorateBranch(course.upper, context),
+  }));
+
+  return withSchool('liuren', {
+    date: {
+      year: Number(year),
+      month: Number(month),
+      day: Number(day),
+      hour: Number(hour),
+      minute: mi,
+    },
+    dayGanzhi,
+    dayStem,
+    dayBranch,
+    hourBranch,
+    monthGeneral,
+    stemLodging: STEM_LODGING[dayStem],
+    // 地盘恒定，天盘随月将加时而转
+    earthPlate: [...BRANCHES],
+    heavenPlate,
+    fourCourses: decoratedCourses,
+    threeTransmissions: decoratedTransmissions,
+    twelveGenerals: generals,
+    xunkong,
+    isFuyin,
+    isFanyin,
+  });
+};
+
+export { STEMS, BRANCHES };

@@ -1,0 +1,383 @@
+# Metaphysics Engine — Divination Calculation Capability Layer
+
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+[简体中文 README](README.md) · [API Docs](docs/api.md) · [Architecture](docs/architecture.md) · [Conventions](CONTRIBUTING.md) · [Security](SECURITY.md) · [License](LICENSE) · [llms.txt](llms.txt) · [Changelog](CHANGELOG.md)
+
+> This is the open-source capability layer (MIT). It and the frozen `v0.2.0` Web full-stack
+> community UI starter are two fully isolated, mutually out-of-sync codebases. This repository
+> shares, reuses or depends on no code, data or assets from that line, and its algorithm rulings,
+> CLI surface and MCP integration do not track it.
+
+**Metaphysics Engine is an open-source, self-hostable calculation engine for Chinese metaphysics and
+astrology**, exposed as a documented HTTP API and an agent-callable CLI. It covers the traditional
+Chinese canon — BaZi (八字排盘), Zi Wei Dou Shu (紫微斗数), Liu Yao stem-branch attachment
+(六爻纳甲), Da Liu Ren (大六壬), Qi Men Dun Jia (奇门遁甲), Ba Zhai feng shui (八宅), almanac
+day-selection (择吉) and name grids (姓名五格) — plus Tarot draws, I Ching divination (周易起卦),
+Zodiac / Ascendant calculations, Synastry analysis (合盘), and AI-assisted interpretation.
+
+It is a **capability layer**, not a web app: no UI, no accounts, no end-user product. The engine is
+**stateless pure calculation** — no database, no sessions, no file writes. Consume it from whatever
+client you build, or wire it into an AI agent as a tool.
+
+> This is an English summary of the [Simplified Chinese README](README.md), which is the
+> authoritative documentation.
+
+## Project snapshot
+
+| Field               | Answer                                                                                                                        |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Project type        | Open-source divination / astrology **calculation capability layer** (MIT), delivered as a self-hosted HTTP API + CLI          |
+| Problem solved      | Turns the silent-failure edge cases of these algorithms into a tested, contract-backed, callable capability                   |
+| Who it is for       | Backend developers adding metaphysics calculation to their own product; teams giving an AI agent a real tool                  |
+| Runtime shape       | **Stateless pure calculation** — no database, no accounts, no sessions, no file writes                                        |
+| Only dependency     | Redis, and it is an **optional pure cache** (affects cross-instance hit rate only, never correctness)                         |
+| Tech stack          | Node.js 20+, Express 4, Node.js test runner                                                                                   |
+| Local prerequisites | Node.js 20+ and npm. No Docker, no database                                                                                   |
+| AI capability       | mock / OpenAI / Anthropic text interpretation, overridable per request; charting works without any key                        |
+| How you consume it  | Call the HTTP API, run `./bazi calc` / `./bazi cast`, or register it as an agent tool                                         |
+| Dev entry point     | `./bazi`, a programmatic CLI for capability calls and repo operations — every command supports `--json`                       |
+| Main entry points   | API routes in `backend/routes`, algorithms in `backend/services`                                                              |
+| API contract        | OpenAPI in [docs/openapi.json](docs/openapi.json), served at `/api-docs`, snapshot guarded in CI                              |
+| License             | MIT. See [LICENSE](LICENSE)                                                                                                   |
+| Key limitation      | Output is for entertainment, cultural research, or product prototyping only — never medical, legal, financial, or life advice |
+
+### What it is not
+
+- Not a web application. The repository contains no frontend code and no hosted instance.
+- Not a hosted online fortune-telling service.
+- Not an npm library; the algorithms are services behind HTTP and the CLI, not a published package.
+- Not a backend scaffold with accounts. Registration, login, OAuth, history, and favorites **were
+  removed from the project** — they belong to the caller.
+- Not a scientific endorsement of divination or astrology.
+- Not a turnkey commercial compliance package.
+
+## Core capabilities
+
+- **BaZi charting** — four pillars, hidden-stem weighted elements, ten gods, strength,
+  **month-branch structure** (格局, per the Zi Ping Zhen Quan school), **two parallel useful-god
+  readings** (支撑/抑制 strength-based and 调候 climate-based, the latter from Qiong Tong Bao Jian),
+  shensha, nayin, twelve life stages, **conception palace, fetal breath, life and body palaces**,
+  inter-pillar clashes/combinations, void branches; luck cycles carry their start instant and a
+  year-by-year breakdown. True solar time participates in charting; results are cached behind an
+  `x-bazi-cache` response header.
+- **Zi Wei Dou Shu** — lunar conversion, the five-element bureau, twelve palaces, fourteen major
+  stars, auspicious/inauspicious stars, twenty B-grade stars, **the trine-and-opposition set
+  (三方四正)**, life and body lords, four transformations, four twelve-god cycles (life stage,
+  scholar, year-front, general-front), decade periods, plus annual and minor periods via `flowYear`. Star placement follows the
+  orthodox chain: bureau from the life-palace nayin → Zi Wei → Tian Fu → the rest. Leap months
+  follow the "fold into the base month" school.
+- **Liu Yao (六爻纳甲)** — King Fang stem-branch attachment: palace membership, world/response
+  lines, stem-branch pairs, six relatives, six gods, hidden spirits, void branches, month/day
+  influence on each line, **moving-line action on the other lines**, line-to-line clashes and
+  combinations, six-clash / six-combination hexagram flags, advancing and retreating branches,
+  inner/outer trigram 伏吟 and 返吟, moving lines and the resulting hexagram. Palace membership is
+  derived from the seven world-hexagram transformation rules, not a hard-coded 64-row table.
+- **Da Liu Ren (大六壬)** — month general over hour to build the heaven/earth plates, stem
+  lodging, the four courses, all nine gates of three-transmission derivation, twelve generals.
+  Each transmission and each upper course carries its **decade stem, the general riding it, and
+  its relative** (reckoned from the day stem), plus a void flag. The month general is the
+  six-combination of the month branch, switching on the mid-qi.
+- **Qi Men Dun Jia (奇门遁甲)** — bureau by the 拆补 (chai-bu) method, earth plate of three marvels and
+  six instruments, duty-chief and duty-envoy, rotating-plate placement of the nine stars,
+  eight gates and eight gods; every palace carries its **relational readings** — heaven/earth stem
+  production and control, star-to-palace and gate-to-palace relations, gate oppression (門迫),
+  in-palace 伏吟, void branches, the travelling horse, stem entombment and the six-instrument
+  punishment.
+- **Ba Zhai feng shui (八宅)** — life trigram (bounded by 立春) and the eight directional
+  wandering stars, derived by line transformation rather than table lookup. Supply a sitting
+  mountain and the **house trigram** is cast alongside it — east/west group, the house's own
+  eight directions, and how the two match.
+- **Almanac (择吉)** — three layers. **By day**: the recommended and avoided activities (宜/忌),
+  the twelve day-officers, the twenty-eight mansions and their luck, the twelve yellow/black-path
+  spirits, the day's clash and kill, auspicious/inauspicious spirits, Peng Zu taboos. **By hour**:
+  each double-hour's own spirit, luck and activities. **By direction**: Tai Sui, its opposition,
+  the three kills, and the annual nine-star chart with the fifth-yellow and second-black palaces.
+  Annual directions are bounded by 立春; the centre star is computed, never looked up in a table.
+- **Name grids (姓名五格)** — heaven/human/earth/outer/total grids and the three-talent
+  configuration. Stroke counts are supplied by the caller.
+- **Tarot** — full deck, SingleCard / ThreeCard / CelticCross spreads.
+- **I Ching** — all 64 hexagrams with their Chinese names, King Wen numbers and the **canonical
+  text** (judgment, line statements, Great Image), number-based (deterministic) and time-based
+  divination, plus the resulting, nuclear, inverse and reversed hexagrams and per-line statements.
+  The text is transcribed from the Chinese Wikisource edition of the Zhou Yi by a committed,
+  re-runnable fetch script — never typed from memory.
+- **Zodiac** — sign profiles, horoscopes, ascendant calculation, compatibility.
+- **Synastry** — chart-pair analysis for two sets of birth data; each side takes its own birth
+  place and timezone, so both charts use the same conventions as standalone BaZi charting.
+- **AI interpretation** — for BaZi, Tarot, and I Ching, via mock / OpenAI / Anthropic, with a
+  concurrency gate and a stream idle timeout.
+- **Operations** — `/live`, `/health`, `/api/ready`, `/metrics` (Prometheus), Pino JSON logs,
+  OpenAPI / Swagger UI, graceful shutdown with a drain window.
+- **Programmatic CLI** — `./bazi` wraps both the algorithms and repo operations; every command
+  supports `--json` and a documented exit-code contract, which makes it directly agent-callable.
+  `./bazi mcp` mounts it as an MCP server over stdio, and `./bazi schema` exports the command tree
+  as tool definitions (Anthropic / OpenAI / MCP) — both generated from that same tree, so there is
+  no second list to drift.
+  Every exported tool carries a declared side-effect level (`read-only` / `local-write` /
+  `destructive`, surfaced as MCP's `readOnlyHint` / `destructiveHint`) and a reproducibility
+  class — the first is what a permission check reads, the second decides whether a result can be
+  cached or used as a regression baseline.
+
+### One boundary running through every capability: casting belongs to the engine, interpretation to the caller
+
+How a chart is _cast_ — three transmissions, star placement, bureau layout, wandering stars —
+has exactly one correct answer, and the engine must get it right. How a chart is _read_ —
+Zi Wei's temple/fall gradings, Qi Men pattern names, the relative weight of a given shensha —
+varies sharply between schools; embedding one school's take would hand callers a judgement
+with no traceable provenance.
+
+So the engine emits every ingredient an interpretation needs, down to the relations between them:
+not just each palace's star, gate, god and stem but how they produce and control one another; not
+just each line's relatives and gods but what the moving lines do to the rest. The dividing line is
+not "anything that sounds like a verdict is withheld" — it is **who is speaking**. Objective
+relations (gate oppression _is_ the palace controlling the gate) and quoted almanac entries (the
+day's 宜/忌) are given; evaluations and contested names (Qi Men pattern names, Zi Wei temple/fall
+gradings) are not.
+
+Where a _casting_ rule genuinely varies (hidden-stem weights, leap-month handling, the chai-bu
+bureau method, rotating-plate placement, the white-tiger/dark-warrior reading of the eight gods,
+entombment by elemental tomb), the choice is registered in one machine-readable source of truth,
+[`backend/constants/rulings.js`](backend/constants/rulings.js): services read their thresholds from
+it, every charting response carries a `school` field naming the school it used, and a lock test pins
+the keys and values. Switching schools touches that one entry plus the line that reads it.
+
+## Quick start
+
+Prerequisites: **Node.js 20+ and npm**. No Docker, no database, no Redis.
+
+```bash
+git clone https://github.com/qilaidev/metaphysics-engine.git
+cd metaphysics-engine
+
+./bazi setup     # install dependencies, generate .env
+./bazi doctor    # environment check; every failure prints an executable fix
+./bazi stack up  # start the engine
+./bazi test      # cli + lint + backend + engine
+```
+
+`./bazi help --json` is the single source of truth for the command list — this document
+deliberately does not duplicate it.
+
+Manual path:
+
+```bash
+npm install && npm -C backend install
+NODE_ENV=development npm -C backend run dev   # http://127.0.0.1:4000
+```
+
+The backend does not bundle dotenv: `node server.js` reads real environment variables only. The
+`./bazi` CLI parses the repo-root `.env` and injects it into child processes, with real
+`process.env` taking precedence.
+
+## Usage examples
+
+```bash
+curl -X POST http://127.0.0.1:4000/api/bazi/calculate \
+  -H "Content-Type: application/json" \
+  -d '{"birthYear":1990,"birthMonth":5,"birthDay":20,"birthHour":14,"gender":"male",
+       "birthLocation":"Beijing","timezone":"Asia/Shanghai"}'
+
+curl -X POST http://127.0.0.1:4000/api/tarot/draw \
+  -H "Content-Type: application/json" -d '{"spreadType":"ThreeCard"}'
+```
+
+The same capabilities through the CLI:
+
+```bash
+./bazi calc bazi --birth 1990-05-20T14:30 --gender male --json
+./bazi cast tarot --spread ThreeCard --json
+```
+
+Full endpoint list: [docs/api.md](docs/api.md). Swagger UI at `/api-docs`, OpenAPI JSON at
+`/api-docs.json`. Every business endpoint is public — there is no authentication to wire up.
+
+There are two ways to hand the engine to an agent. Both derive their tool definitions from the same
+command tree, so there is no second list to drift.
+
+**A ready-to-mount MCP server** — `./bazi mcp`, over stdio:
+
+```json
+{ "command": "./bazi", "args": ["mcp"] }
+```
+
+It exposes the 14 calculation tools by default, all read-only; operational commands require an
+explicit `--scope ops|all`. Every tool call spawns a real CLI run, so argument validation, the
+guard on destructive operations, and the exit-code contract all carry over unchanged; exit codes
+become `isError`, and the CLI's `hint` / `next` fields go straight to the model. The engine has to
+be running.
+
+**A definition you register yourself** — `./bazi schema`, which needs no running engine:
+
+```bash
+./bazi schema --format openai > tools.json
+```
+
+Each exported tool carries a side-effect level (`read-only` / `local-write` / `destructive`) and a
+reproducibility class — the former for permission decisions, the latter to decide whether a result
+can be cached or used as a regression baseline.
+
+## API endpoints
+
+Every business endpoint is public and unauthenticated — the project has no account system. Only the
+operations surface is protected.
+
+| Capability                    | HTTP endpoint                                                                                   | CLI                    |
+| ----------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------- |
+| BaZi chart                    | `POST /api/bazi/calculate`                                                                      | `./bazi calc bazi`     |
+| BaZi AI interpretation        | `POST /api/bazi/ai-interpret` · `POST /api/bazi/full-analysis`                                  | —                      |
+| Zi Wei Dou Shu                | `POST /api/ziwei/calculate`                                                                     | `./bazi calc ziwei`    |
+| Liu Yao (King Fang)           | `POST /api/liuyao/chart`                                                                        | `./bazi calc liuyao`   |
+| Da Liu Ren                    | `POST /api/liuren/chart`                                                                        | `./bazi calc liuren`   |
+| Qi Men Dun Jia                | `POST /api/qimen/chart`                                                                         | `./bazi calc qimen`    |
+| Ba Zhai feng shui             | `POST /api/fengshui/bazhai`                                                                     | `./bazi calc bazhai`   |
+| Almanac / day selection       | `GET /api/fengshui/almanac`                                                                     | `./bazi calc almanac`  |
+| Name grids                    | `POST /api/fengshui/name`                                                                       | `./bazi calc name`     |
+| Synastry                      | `POST /api/synastry/analyze`                                                                    | `./bazi calc synastry` |
+| Tarot                         | `POST /api/tarot/draw` · `GET /api/tarot/cards` · `POST /api/tarot/ai-interpret`                | `./bazi cast tarot`    |
+| I Ching                       | `POST /api/iching/divine` · `GET /api/iching/hexagrams` · `POST /api/iching/ai-interpret`       | `./bazi cast iching`   |
+| Zodiac                        | `GET /api/zodiac/{sign}` · `GET /api/zodiac/{sign}/horoscope` · `GET /api/zodiac/compatibility` | `./bazi calc zodiac`   |
+| Ascendant                     | `POST /api/zodiac/rising`                                                                       | `./bazi calc rising`   |
+| Daily pillar                  | `GET /api/calendar/daily`                                                                       | `./bazi calc daily`    |
+| True-solar-time locations     | `GET /api/locations`                                                                            | —                      |
+| AI provider status            | `GET /api/ai/providers`                                                                         | —                      |
+| Health / readiness            | `GET /live` · `GET /health` · `GET /api/ready` · `GET /api/system/cache-status`                 | `./bazi stack status`  |
+| API docs (Basic Auth in prod) | `GET /api-docs` · `GET /api-docs.json`                                                          | —                      |
+| Metrics (bearer token)        | `GET /metrics`                                                                                  | —                      |
+
+## Configuration
+
+See [.env.example](.env.example) for development and
+[env.production.template](env.production.template) for production.
+
+**Development needs no configuration at all** — every variable has a default. In production:
+
+- `DOCS_PASSWORD` — the **only hard requirement**. Without it the process exits at startup.
+- `CORS_ALLOWED_ORIGINS` — browser client origins. Server-to-server and agent callers send no
+  Origin header and are unaffected.
+- `BACKEND_BASE_URL` — base URL advertised in the OpenAPI document.
+- `TRUST_PROXY` — set to the **hop count** (`1` for a single nginx). Setting it to `true` trusts any
+  `X-Forwarded-For`, which makes rate limiting bypassable with a forged header.
+- `REDIS_URL` — optional; cross-instance chart cache only.
+- `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — optional; without them `AI_PROVIDER` falls back to `mock`.
+- `METRICS_TOKEN` — bearer token for `/metrics`; left empty the endpoint returns 404 in production.
+- `SHUTDOWN_DRAIN_MS` — drain window; size it against your load balancer's probe cadence (the
+  template has a lookup table).
+
+## FAQ
+
+### Is the engine truly stateless? How does horizontal scaling work?
+
+Yes. There is no database, no user account system, no session store, and no disk writes. Every chart calculation runs purely in memory. To scale out, run more instances behind your reverse proxy. `REDIS_URL` is strictly optional and only shares BaZi chart cache across instances; without Redis, each instance uses an in-process cache with identical calculation results.
+
+### How accurate is True Solar Time (真太阳时)?
+
+Whenever a birth location (or longitude/timezone) resolves, BaZi and Synastry charting automatically applies true solar time correction (longitude offset + equation of time) so hour-pillar and solar-term boundaries remain accurate. Pass `trueSolarTime: false` to fall back to local clock time.
+
+### How do I wire this into an AI Agent via MCP or CLI?
+
+The root `./bazi` CLI is built for programmatic agent use: every command supports `--json` (clean JSON on stdout, diagnostics on stderr) and a documented exit-code contract. Run `./bazi mcp` to expose the 14 read-only capability tools as a stdio MCP server, or `./bazi schema` to export Anthropic / OpenAI / MCP tool definitions.
+
+### How is the OpenAPI contract kept in sync?
+
+The full HTTP specification lives in [docs/openapi.json](docs/openapi.json) and is served at runtime on `/api-docs` (protected by `DOCS_PASSWORD` Basic Auth in production). CI enforces an OpenAPI snapshot check and `scripts/check-docs.sh` to prevent contract drift.
+
+### Can it run without an LLM API key?
+
+Yes. All deterministic charting, casting, and almanac calculations require zero LLM keys. If `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are unset, interpretation endpoints fall back to the `mock` provider.
+
+### What are the commercial and compliance boundaries?
+
+The codebase is MIT-licensed — commercial use, modification, and redistribution are permitted. Output is intended for entertainment, cultural research, education, and prototyping. Deployers remain responsible for user-facing disclaimers, privacy/data-protection compliance, app-store review, and local regulations.
+
+### Why use `./bazi` instead of calling `npm` scripts directly?
+
+`./bazi` tracks the managed engine process PID and state; a manually started `node server.js` cannot be stopped or inspected by `./bazi stack`. The CLI also generates `.env`, checks port/dependency readiness, and prints executable remediation commands on failure (`./bazi help --json`).
+
+## Testing
+
+```bash
+./bazi test                        # cli + lint + backend + engine
+./bazi test --fail-on-skip --json  # for CI: a skipped target becomes a hard failure
+```
+
+**The first three targets need no external services** — no database to provision, no containers to
+start. That is a direct consequence of the stateless design. `engine` is the one exception: it runs
+the capability commands against a live engine to verify that the reproducibility declared in the
+exported tool schema actually holds (anything declared `deterministic` must return byte-identical
+output twice in a row). It is recorded as `skipped` when no engine is running.
+
+## Production notes
+
+- Stateless: scaling out is just more processes. No sticky sessions, no coordination.
+- The container stack publishes the port to `127.0.0.1:4000` on the host by default
+  (`BACKEND_BIND_ADDR`); TLS termination belongs to your reverse proxy. That is a different knob
+  from `BIND_HOST`, the address the Node process listens on inside the container (`0.0.0.0` in
+  production) — get either one wrong and the engine ends up on the public internet.
+- Startup validates production config: a missing `DOCS_PASSWORD` blocks boot; everything else warns.
+- Graceful shutdown drains before closing the listener — `SHUTDOWN_DRAIN_MS` must stay below the
+  orchestrator's stop grace period.
+- Read [PRODUCTION.md](PRODUCTION.md) before deploying.
+
+## Development
+
+The hardest part of this project is not writing code, it is that **a wrong answer raises no
+error**: three-transmission derivation, the star-placement chain, bureau determination, the
+instant a solar term turns. Get one wrong and nothing throws — you simply get a wrong chart.
+So classify the problem before changing an algorithm, because the two cases are handled very
+differently: **a bug** (a missing derivation gate, a wrong stem-branch pair) gets fixed and
+covered by a test; **a school difference** (leap-month handling, late-Zi day rollover) does
+not — the chosen ruling is documented in place and may be exposed as a parameter, but the
+default is not silently changed.
+
+Where a new capability has to land, the local quality gates, the commit convention
+and the changes that are out of bounds are all in [CONTRIBUTING.md](CONTRIBUTING.md). The
+rulings already chosen are listed one by one in
+[.claude/skills/bazi-cli/SKILL.md](.claude/skills/bazi-cli/SKILL.md) — read that before
+touching an algorithm.
+
+## Limitations
+
+- A reference implementation. No hosted service, no accuracy guarantee.
+- Output suits entertainment, cultural research, prototyping, and code study — not professional advice.
+- The algorithms make school-specific choices (late-Zi hour does not roll the day pillar, leap
+  months fold into the base month, hidden-stem weights and strength thresholds, and true solar time
+  participates in charting by default whenever the birth location resolves to a longitude — pass
+  `trueSolarTime: false` to fall back to clock time). These are documented one by one in
+  [.claude/skills/bazi-cli/SKILL.md](.claude/skills/bazi-cli/SKILL.md) and annotated in the code.
+- AI interpretation depends on provider model quality, keys, rate limits, and prompts.
+- Reverse proxy, domains, certificates, and jurisdictional compliance are the deployer's responsibility.
+
+## Search keywords
+
+Metaphysics Engine, Chinese metaphysics API, BaZi calculation API, Zi Wei Dou Shu API, Liu Yao CLI, Da Liu Ren, Qi Men Dun Jia API, Ba Zhai feng shui, Tarot API, I Ching, Synastry, agent-callable divination CLI, stateless fortune-telling backend, OpenAPI metaphysics, 术数算法能力层, 八字排盘 API, 紫微斗数, 六爻纳甲, 奇门遁甲.
+
+Suggested GitHub About: `Stateless Chinese metaphysics calculation engine — BaZi, Zi Wei, Liu Yao, Da Liu Ren, Qi Men, Ba Zhai, Tarot, I Ching — HTTP API + agent CLI.`
+
+AI index: [llms.txt](llms.txt).
+
+## Documentation
+
+Index and sync rules: [docs/README.md](docs/README.md). The Chinese README is authoritative.
+
+- [docs/architecture.md](docs/architecture.md) — architecture
+- [docs/modules.md](docs/modules.md) — key modules and core logic
+- [docs/deployment.md](docs/deployment.md) — local, container, and server deploy
+- [docs/configuration.md](docs/configuration.md) — configuration
+- [docs/operations.md](docs/operations.md) — operations and troubleshooting
+- [docs/development.md](docs/development.md) — local development
+- [docs/api.md](docs/api.md) — HTTP API guide
+- [docs/faq.md](docs/faq.md) — FAQ
+- [llms.txt](llms.txt) — AI / answer-engine summary
+- [.claude/skills/bazi-cli/SKILL.md](.claude/skills/bazi-cli/SKILL.md) — algorithmic semantics and the CLI contract
+- [CONTRIBUTING.md](CONTRIBUTING.md) — development conventions, quality gates, algorithm-change criteria
+- [PRODUCTION.md](PRODUCTION.md) — production deployment details
+
+## License
+
+MIT. See [LICENSE](LICENSE). Fork, modify, redistribute and commercial use are all permitted.
+
+Disclaimers for divination/astrology content, privacy and data protection, app-store and platform
+review, and local regulatory compliance remain the deployer's responsibility. This repository shares
+no code with the frozen `v0.2.0` community Web UI starter — do not move changes between the two.

@@ -1,0 +1,207 @@
+import { defineCommand } from '../core/registry.mjs';
+import { usageError } from '../core/errors.mjs';
+import { callApi, describeRequest, resolveTimeout } from '../core/apiClient.mjs';
+
+/**
+ * 能力命令：起卦类。
+ *
+ * 和 calc 分开是因为结果性质不同 —— 这些命令**同样的输入不保证同样的输出**
+ * （塔罗抽牌、时间起卦都含随机或时刻因素）。放进 calc 会让调用方误以为
+ * 可以拿它做幂等重试或结果比对。
+ */
+
+const ICHING_METHODS = ['number', 'time'];
+
+const parseNumbers = (raw) => {
+  const parts = String(raw)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length !== 3) {
+    throw usageError(`--numbers 需要三个数字，收到 ${parts.length} 个`, {
+      next: 'bazi cast iching --numbers 7,8,9 --json',
+      details: { received: raw },
+    });
+  }
+  const numbers = parts.map((p) => Number(p));
+  if (numbers.some((n) => !Number.isFinite(n))) {
+    throw usageError(`--numbers 里有不是数字的项："${raw}"`, {
+      next: 'bazi cast iching --numbers 7,8,9 --json',
+    });
+  }
+  return numbers;
+};
+
+const ichingCommand = defineCommand({
+  name: 'iching',
+  summary: '易经起卦：本卦、变爻',
+  description:
+    'method=number 用给定的三个数起卦（同样的数字得同样的卦，可复现）；\n' +
+    'method=time 用当前时刻起卦 —— 每次调用结果都不同，不要用它做回归测试。',
+  /**
+   * cast 这一支整体不可复现，但这条命令是例外：给定数字起卦是纯计算。
+   * 曾经整棵 cast 子树被一刀切标成 not-reproducible，于是"要可复现的卦就用
+   * --numbers"这条唯一的出路，在 schema 里是看不见的。
+   */
+  reproducibility: {
+    key: 'conditional',
+    note: '--method number 配 --numbers 时是纯计算，同样的数字必得同样的卦，可用于回归比对；--method time 由调用时刻决定，每次都不同。',
+    requires: ['numbers'],
+  },
+  flags: [
+    {
+      name: 'method',
+      type: 'string',
+      choices: ICHING_METHODS,
+      summary: `起卦方式（${ICHING_METHODS.join(' / ')}），默认 number`,
+    },
+    {
+      name: 'numbers',
+      type: 'string',
+      summary: '三个数字，逗号分隔，如 7,8,9（method=number 必填）',
+    },
+    { name: 'timeout', type: 'number', summary: '请求超时毫秒数' },
+  ],
+  examples: [
+    { note: '用数字起卦（可复现）', command: 'bazi cast iching --numbers 7,8,9 --json' },
+    { note: '用当前时刻起卦', command: 'bazi cast iching --method time --json' },
+  ],
+  run: async ({ flags, out }) => {
+    const method = flags.method ?? 'number';
+    if (!ICHING_METHODS.includes(method)) {
+      throw usageError(`--method 只接受 ${ICHING_METHODS.join(' / ')}，收到 "${method}"`, {
+        next: 'bazi cast iching --numbers 7,8,9 --json',
+      });
+    }
+
+    const body = { method };
+    if (method === 'number') {
+      if (flags.numbers === undefined) {
+        throw usageError('method=number 需要 --numbers', {
+          hint: '想让引擎按当前时刻起卦就用 --method time。',
+          next: 'bazi cast iching --numbers 7,8,9 --json',
+        });
+      }
+      body.numbers = parseNumbers(flags.numbers);
+    } else if (flags.numbers !== undefined) {
+      out.warn('--method time 会忽略 --numbers（卦象由当前时刻决定）');
+    }
+
+    const path = '/api/iching/divine';
+
+    if (flags['dry-run']) {
+      const preview = describeRequest({ method: 'POST', path, body });
+      return out.ok(
+        preview,
+        (d) => `会发送 POST ${d.wouldRequest.url}\n${JSON.stringify(body, null, 2)}`
+      );
+    }
+
+    out.step('向引擎请求起卦');
+    const data = await callApi(path, { method: 'POST', body, timeoutMs: resolveTimeout(flags) });
+    return out.ok(data, (d) => {
+      const name = d.hexagram?.name || d.hexagram?.chineseName || '未知';
+      const changing =
+        Array.isArray(d.changingLines) && d.changingLines.length
+          ? `变爻: ${d.changingLines.join(', ')}`
+          : '无变爻';
+      // 《周易》经文：卦辞与变爻爻辞。梅花起卦只有一个动爻，断的就是那一句
+      const moving = new Set(d.changingLines || []);
+      const yaoLines = (d.detailedLines || [])
+        .filter((l) => moving.has(l.position) && l.yaoText)
+        .map((l) => `${l.yaoText.title}: ${l.yaoText.text}`);
+      return [
+        `本卦: ${name}`,
+        changing,
+        d.hexagram?.text?.gua ? `卦辞: ${d.hexagram.text.gua}` : null,
+        d.hexagram?.text?.daXiang ? `大象: ${d.hexagram.text.daXiang}` : null,
+        ...yaoLines,
+      ]
+        .filter(Boolean)
+        .join('\n');
+    });
+  },
+});
+
+const tarotCommand = defineCommand({
+  name: 'tarot',
+  summary: '塔罗抽牌',
+  description:
+    '不给 --seed 时每次调用都重新随机，同样的参数不会给出同样的牌 —— 那种情况不要用它做回归测试。\n' +
+    '给了 --seed 就是纯计算：同一 seed 配同一牌阵必得同一副牌与同一组正逆。',
+  /**
+   * 与 iching 同一情形：这条命令是否可复现取决于给没给参数，不是命令本身的属性。
+   * 整支 cast 声明 not-reproducible，这里按 seed 的有无覆盖成 conditional ——
+   * 否则「要可复现的牌就给 --seed」这条唯一的出路，在 schema 里是看不见的。
+   */
+  reproducibility: {
+    key: 'conditional',
+    note: '给了 --seed 时是纯计算，同一 seed 必得同一副牌，可用于回归比对；不给则每次重新随机。',
+    requires: ['seed'],
+  },
+  flags: [
+    {
+      name: 'spread',
+      type: 'string',
+      summary:
+        '牌阵：SingleCard / ThreeCard / CelticCross（也认 three、celtic 等别名）；未知回退单牌并标 fallback',
+    },
+    {
+      name: 'seed',
+      type: 'string',
+      summary: '随机种子（任意字符串，≤200 字符）。给了它结果就可复现，响应里 reproducible 为 true',
+    },
+    { name: 'timeout', type: 'number', summary: '请求超时毫秒数' },
+  ],
+  examples: [
+    { note: '抽一张', command: 'bazi cast tarot --json' },
+    { note: '三张牌阵', command: 'bazi cast tarot --spread ThreeCard --json' },
+    { note: '别名 three 同样三张', command: 'bazi cast tarot --spread three --json' },
+    {
+      note: '可复现（同 seed 同牌）',
+      command: 'bazi cast tarot --spread three --seed demo --json',
+    },
+  ],
+  run: async ({ flags, out }) => {
+    const body = { spreadType: flags.spread ?? 'SingleCard' };
+    if (flags.seed !== undefined) body.seed = flags.seed;
+    const path = '/api/tarot/draw';
+
+    if (flags['dry-run']) {
+      const preview = describeRequest({ method: 'POST', path, body });
+      return out.ok(
+        preview,
+        (d) => `会发送 POST ${d.wouldRequest.url}\n${JSON.stringify(body, null, 2)}`
+      );
+    }
+
+    out.step('向引擎请求抽牌');
+    const data = await callApi(path, { method: 'POST', body, timeoutMs: resolveTimeout(flags) });
+    return out.ok(data, (d) => {
+      const cards = d.cards;
+      if (!Array.isArray(cards) || !cards.length) return '抽牌完成（结构见 --json）';
+      const lines = cards.map(
+        (c) => `${c.position ?? '-'}. ${c.name}${c.isReversed ? '（逆位）' : '（正位）'}`
+      );
+      // 可复现与否直接写在人读的那份里 —— 这是决定能不能拿它做基准的唯一依据
+      if (d.seed) lines.push(`seed: ${d.seed}（可复现，同参数重放必得此结果）`);
+      return lines.join('\n');
+    });
+  },
+});
+
+export const castCommand = defineCommand({
+  name: 'cast',
+  summary: '算法能力：起卦抽牌（易经 / 塔罗）',
+  description:
+    '与 calc 的区别是结果不保证可复现：塔罗每次重新随机，时间起卦取决于调用时刻。\n' +
+    '跑之前引擎必须在跑（bazi stack up）。',
+  kind: 'capability',
+  effect: 'read-only',
+  reproducibility: {
+    key: 'not-reproducible',
+    note: '同样的输入不保证同样的输出（重新随机，或取决于调用时刻），不要用于幂等重试或结果断言。',
+  },
+  commands: [ichingCommand, tarotCommand],
+  examples: [{ note: '抽一张塔罗', command: 'bazi cast tarot --json' }],
+});

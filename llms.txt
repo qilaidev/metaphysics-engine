@@ -1,0 +1,56 @@
+# Metaphysics Engine
+
+> Open-source (MIT), self-hostable, stateless Chinese metaphysics and divination calculation engine (BaZi, Zi Wei Dou Shu, Liu Yao, Da Liu Ren, Qi Men Dun Jia, Ba Zhai, Almanac, Name Grids, Tarot, I Ching, Zodiac, Synastry) exposed via an OpenAPI-documented HTTP API, a `--json` programmatic CLI (`./bazi`), and a stdio MCP server.
+
+## Canonical Facts
+
+- **Repository**: https://github.com/qilaidev/metaphysics-engine
+- **License**: MIT (`LICENSE`)
+- **Runtime**: Node.js 20+, Express 4 (no database, no user accounts, no session state, no disk writes)
+- **Optional Cache**: Redis (`REDIS_URL`) for cross-instance BaZi chart caching only; never affects calculation correctness
+- **AI Interpretation**: Optional (`mock`, OpenAI, Anthropic); all deterministic charting works without any API key
+- **API Contract**: `docs/openapi.json` (served at `/api-docs`, snapshot-tested in CI)
+- **Default Local URL**: `http://127.0.0.1:4000`
+
+## Entrypoints: HTTP, CLI (`--json`), and MCP
+
+- **HTTP API** (`backend/routes/*`, `backend/services/*`):
+  - `POST /api/bazi/calculate` — BaZi (Four Pillars, Ten Gods, Useful Gods, Da Yun, True Solar Time)
+  - `POST /api/ziwei/calculate` — Zi Wei Dou Shu (12 palaces, 14 major stars, Four Transformations, decade/annual flows)
+  - `POST /api/liuyao/chart` — Liu Yao (King Fang stem-branch attachment, 6 relatives/gods, moving lines)
+  - `POST /api/liuren/chart` — Da Liu Ren (heaven/earth plates, 4 courses, all 9 three-transmission gates)
+  - `POST /api/qimen/chart` — Qi Men Dun Jia (chai-bu bureau, rotating plate, palace relational readings)
+  - `POST /api/fengshui/bazhai` · `GET /api/fengshui/almanac` · `POST /api/fengshui/name` — Ba Zhai, Almanac, Name Grids
+  - `POST /api/tarot/draw` · `POST /api/iching/divine` · `GET /api/zodiac/{sign}` · `POST /api/zodiac/rising` · `POST /api/synastry/analyze`
+  - `GET /live` · `GET /health` · `GET /api/ready` · `GET /metrics`
+- **Programmatic CLI** (`./bazi`, every command supports `--json` and deterministic exit codes):
+  - `./bazi help --json` — authoritative machine-readable command tree
+  - `./bazi calc <bazi|ziwei|liuyao|liuren|qimen|bazhai|almanac|name|synastry|zodiac|rising|daily> --json`
+  - `./bazi cast <tarot|iching> --json`
+  - `./bazi setup` · `./bazi doctor --json` · `./bazi stack up` · `./bazi stack status --json` · `./bazi test --json`
+- **MCP & Tool Schemas**:
+  - `./bazi mcp` — stdio MCP server exposing 14 read-only capability tools
+  - `./bazi schema` — exports Anthropic / OpenAI / MCP tool schemas from the same command tree
+
+## Algorithm Boundary
+
+**Casting belongs to the engine; interpretation belongs to the caller.** The engine outputs exact chart structures and objective relational readings (e.g., stem/element production and control, gate oppression) without hard-coding subjective verdicts. School rulings (e.g., leap-month handling, chai-bu bureau, rotating plate) are centralized in `backend/constants/rulings.js` and returned in each response's `school` field.
+
+## Quick Start
+
+```bash
+git clone https://github.com/qilaidev/metaphysics-engine.git
+cd metaphysics-engine
+./bazi setup && ./bazi doctor && ./bazi stack up
+./bazi test
+```
+
+## Documentation
+
+- [Chinese README (Authoritative)](https://github.com/qilaidev/metaphysics-engine/blob/main/README.md): Overview, capabilities, quickstart, FAQ, and production notes
+- [English README](https://github.com/qilaidev/metaphysics-engine/blob/main/README.en.md): English overview, API table, and FAQ
+- [API Guide](https://github.com/qilaidev/metaphysics-engine/blob/main/docs/api.md): HTTP endpoints and request/response conventions
+- [OpenAPI Spec](https://github.com/qilaidev/metaphysics-engine/blob/main/docs/openapi.json): Machine-readable HTTP contract
+- [Architecture](https://github.com/qilaidev/metaphysics-engine/blob/main/docs/architecture.md): Stateless design and module boundaries
+- [Contributing](https://github.com/qilaidev/metaphysics-engine/blob/main/CONTRIBUTING.md): Development conventions and algorithm change criteria
+- [Security Policy](https://github.com/qilaidev/metaphysics-engine/blob/main/SECURITY.md): Vulnerability reporting and self-hosting security

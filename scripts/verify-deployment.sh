@@ -1,0 +1,437 @@
+#!/bin/bash
+
+# Metaphysics Engine 部署验证脚本
+# 用于验证生产部署的完整性和功能正确性
+
+set -euo pipefail
+
+# Configuration
+API_BASE_URL="${API_BASE_URL:-http://localhost:4000}"
+TIMEOUT="${TIMEOUT:-30}"
+RETRIES="${RETRIES:-3}"
+
+# Color output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# All logging goes to stderr, without exception.
+#
+# http_request returns the response body on stdout and callers capture it with $(...).
+# When these helpers wrote to stdout, every "[INFO] Attempting GET ..." line ended up
+# glued to the front of the JSON body, so `jq` failed on it and every single
+# validate_json call reported "key not found" — on a perfectly healthy deployment.
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1" >&2
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1" >&2
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1" >&2
+}
+
+log_step() {
+    echo -e "${BLUE}[STEP]${NC} $1" >&2
+}
+
+# HTTP request helper with timeout and retries
+http_request() {
+    local url=$1
+    local expected_code=${2:-200}
+    local method=${3:-GET}
+    local data=${4:-}
+
+    for attempt in $(seq 1 $RETRIES); do
+        log_info "Attempting $method $url (attempt $attempt/$RETRIES)"
+
+        local response
+        if [ "$method" = "POST" ]; then
+            response=$(curl -s -w "HTTPSTATUS:%{http_code};" -X POST -H "Content-Type: application/json" -d "$data" "$url" 2>/dev/null || echo "HTTPSTATUS:000;")
+        else
+            response=$(curl -s -w "HTTPSTATUS:%{http_code};" "$url" 2>/dev/null || echo "HTTPSTATUS:000;")
+        fi
+
+        local body=$(echo "$response" | sed -e 's/HTTPSTATUS:.*//g')
+        local status=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://' | sed -e 's/;.*//g')
+
+        if [ "$status" = "$expected_code" ]; then
+            echo "$body"
+            return 0
+        fi
+
+        if [ $attempt -eq $RETRIES ]; then
+            log_error "Request failed after $RETRIES attempts. Expected $expected_code, got $status"
+            log_error "Response: $body"
+            return 1
+        fi
+
+        log_warn "Request failed (status: $status), retrying in 2 seconds..."
+        sleep 2
+    done
+}
+
+# Validate JSON response
+validate_json() {
+    local json=$1
+    local key=$2
+    # 默认值不能省：脚本开了 set -u，两参调用（只查键存在）会在这里直接
+    # "unbound variable" 退出，把后面所有检查一起带走。
+    local expected_value=${3:-}
+
+    if ! echo "$json" | jq -e ".$key" >/dev/null 2>&1; then
+        log_error "JSON validation failed: key '$key' not found"
+        return 1
+    fi
+
+    if [ -n "$expected_value" ]; then
+        local actual_value=$(echo "$json" | jq -r ".$key")
+        if [ "$actual_value" != "$expected_value" ]; then
+            log_error "JSON validation failed: expected '$expected_value', got '$actual_value' for key '$key'"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# Test 1: Basic connectivity and health checks
+test_basic_connectivity() {
+    log_step "1. Testing basic connectivity and health checks"
+
+    # Test API liveness endpoint
+    log_info "Testing API liveness endpoint..."
+    if ! http_request "$API_BASE_URL/live" >/dev/null; then
+        log_error "API liveness check failed"
+        return 1
+    fi
+    log_success "API liveness check passed"
+
+    # Test API health endpoint
+    log_info "Testing API health endpoint..."
+    local health_response
+    if ! health_response=$(http_request "$API_BASE_URL/health"); then
+        log_error "API health check failed"
+        return 1
+    fi
+
+    validate_json "$health_response" "status" "ok"
+    validate_json "$health_response" "service" "metaphysics-engine-backend"
+    validate_json "$health_response" "timestamp"
+    log_success "API health check passed"
+
+    # Test API ready endpoint
+    log_info "Testing API ready endpoint..."
+    local ready_response
+    if ! ready_response=$(http_request "$API_BASE_URL/api/ready"); then
+        log_error "API ready check failed"
+        return 1
+    fi
+
+    validate_json "$ready_response" "status"
+    validate_json "$ready_response" "checks"
+    log_success "API ready check passed"
+}
+
+# Test 2: Core API functionality
+#
+# Every business endpoint is public — the engine has no account system. A probe that
+# expected 401 here used to "pass" by asserting an auth layer that no longer exists.
+test_core_api() {
+    log_step "2. Testing core API functionality"
+
+    log_info "Testing bazi calculation endpoint..."
+    local calc_payload='{
+        "birthYear": 1993,
+        "birthMonth": 6,
+        "birthDay": 18,
+        "birthHour": 12,
+        "gender": "male",
+        "birthLocation": "Beijing",
+        "timezone": "Asia/Shanghai"
+    }'
+
+    local calc_response
+    if ! calc_response=$(http_request "$API_BASE_URL/api/bazi/calculate" 200 "POST" "$calc_payload"); then
+        log_error "Bazi calculation failed"
+        return 1
+    fi
+
+    validate_json "$calc_response" "pillars"
+    validate_json "$calc_response" "fiveElements"
+    log_success "Bazi calculation works correctly"
+
+    log_info "Testing tarot deck endpoint..."
+    if ! http_request "$API_BASE_URL/api/tarot/cards" 200 >/dev/null; then
+        log_error "Tarot deck endpoint failed"
+        return 1
+    fi
+    log_success "Tarot deck endpoint works correctly"
+
+    log_info "Testing I Ching hexagram table..."
+    if ! http_request "$API_BASE_URL/api/iching/hexagrams" 200 >/dev/null; then
+        log_error "I Ching hexagram endpoint failed"
+        return 1
+    fi
+    log_success "I Ching hexagram endpoint works correctly"
+
+    log_info "Rejecting a malformed request..."
+    if ! http_request "$API_BASE_URL/api/bazi/calculate" 400 "POST" '{"birthYear":1993}' >/dev/null; then
+        log_error "Malformed request should be rejected with 400"
+        return 1
+    fi
+    log_success "Input validation is active"
+}
+
+# Test 3: External service connectivity
+#
+# Redis is the only external dependency and it is a pure cache: "disabled" and
+# "unreachable" are both survivable, so only a *configured but broken* Redis fails here.
+test_external_services() {
+    log_step "3. Testing external service connectivity"
+
+    # Check Redis status via ready endpoint
+    log_info "Checking Redis status..."
+    local ready_response
+    if ! ready_response=$(http_request "$API_BASE_URL/api/ready"); then
+        log_error "Could not get ready status"
+        return 1
+    fi
+
+    local redis_status=$(echo "$ready_response" | jq -r '.checks.redis.ok')
+    local redis_disabled=$(echo "$ready_response" | jq -r '.checks.redis.status')
+
+    if [ "$redis_disabled" = "disabled" ]; then
+        log_warn "Redis is not configured — each instance keeps its own in-memory chart cache"
+    elif [ "$redis_status" = "true" ]; then
+        log_success "Redis is connected and operational"
+    else
+        log_error "Redis connectivity issue: $(echo "$ready_response" | jq -r '.checks.redis.error')"
+        return 1
+    fi
+}
+
+# Test 4: Performance baseline
+test_performance() {
+    log_step "4. Testing performance baseline"
+
+    log_info "Running performance baseline tests..."
+
+    # Test response time for health endpoint
+    local start_time=$(date +%s%N)
+    if ! http_request "$API_BASE_URL/health" >/dev/null; then
+        log_error "Health endpoint performance test failed"
+        return 1
+    fi
+    local end_time=$(date +%s%N)
+    local response_time=$(( (end_time - start_time) / 1000000 )) # Convert to milliseconds
+
+    if [ $response_time -gt 1000 ]; then
+        log_warn "Health endpoint response time is high: ${response_time}ms (expected < 1000ms)"
+    else
+        log_success "Health endpoint response time: ${response_time}ms"
+    fi
+}
+
+# Test 5: Load test (light)
+test_load() {
+    log_step "5. Running light load test"
+
+    if [ "${SKIP_LOAD_TESTS:-false}" = "true" ]; then
+        log_warn "Skipping load tests (SKIP_LOAD_TESTS=true)"
+        return 0
+    fi
+
+    log_info "Running light concurrent load test (10 requests)..."
+
+    # Run 10 concurrent requests to health endpoint
+    local pids=()
+    local failed=0
+
+    for i in {1..10}; do
+        (
+            # `exit 1`, not `echo`: the parent decides pass/fail from the subshell's
+            # exit status, and echo always succeeds — so this test used to pass
+            # unconditionally, even with every request failing.
+            http_request "$API_BASE_URL/health" >/dev/null 2>&1 || exit 1
+        ) &
+        pids+=($!)
+    done
+
+    # Wait for all requests to complete
+    for pid in "${pids[@]}"; do
+        if ! wait "$pid" 2>/dev/null; then
+            failed=$((failed + 1))
+        fi
+    done
+
+    if [ $failed -gt 0 ]; then
+        log_error "Load test failed: $failed out of 10 requests failed"
+        return 1
+    else
+        log_success "Load test passed: all 10 concurrent requests succeeded"
+    fi
+}
+
+# Test 6: OpenAPI documentation
+test_openapi() {
+    log_step "6. Testing OpenAPI documentation"
+
+    # /api-docs is behind Basic Auth in production, so an unauthenticated probe gets
+    # 401 — which is the correct, healthy response. Expecting 200 made this test fail
+    # on every production run, and a check that is always red stops being read.
+    # ${arr[@]+"${arr[@]}"} 而不是 "${arr[@]}"：bash 3.2（macOS 自带）在 set -u 下把
+    # 空数组的展开当成未绑定变量，脚本会在这里直接退出。
+    local auth_args=()
+    if [ -n "${DOCS_PASSWORD:-}" ]; then
+        auth_args=(-u "${DOCS_USER:-admin}:${DOCS_PASSWORD}")
+    fi
+
+    log_info "Testing OpenAPI specification endpoint..."
+    local spec_status
+    spec_status=$(curl -s -o /dev/null -w '%{http_code}' ${auth_args[@]+"${auth_args[@]}"} \
+        "$API_BASE_URL/api-docs.json" || echo "000")
+    case "$spec_status" in
+        200) log_success "OpenAPI specification is accessible" ;;
+        401) log_success "OpenAPI specification is protected by Basic Auth (401)" ;;
+        *)
+            log_error "OpenAPI specification returned unexpected status: $spec_status"
+            return 1
+            ;;
+    esac
+
+    log_info "Testing Swagger UI..."
+    local ui_status
+    ui_status=$(curl -s -o /dev/null -w '%{http_code}' ${auth_args[@]+"${auth_args[@]}"} \
+        "$API_BASE_URL/api-docs/" || echo "000")
+    case "$ui_status" in
+        200) log_success "Swagger UI is accessible" ;;
+        401) log_success "Swagger UI is protected by Basic Auth (401)" ;;
+        *)
+            log_error "Swagger UI returned unexpected status: $ui_status"
+            return 1
+            ;;
+    esac
+}
+
+# Main function
+main() {
+    log_info "🚀 Starting Metaphysics Engine deployment verification"
+    log_info "API Base URL: $API_BASE_URL"
+    log_info "Timeout: ${TIMEOUT}s, Retries: $RETRIES"
+    echo
+
+    local start_time=$(date +%s)
+    local test_count=0
+    local pass_count=0
+    local fail_count=0
+
+    # Run all tests
+    local tests=(
+        "test_basic_connectivity"
+        "test_core_api"
+        "test_external_services"
+        "test_performance"
+        "test_load"
+        "test_openapi"
+    )
+
+    # Plain arithmetic assignment rather than ((x++)): post-increment evaluates to the
+    # old value, so the first increment from 0 returns status 1 and `set -e` aborts the
+    # whole run before a single test reports.
+    for test_func in "${tests[@]}"; do
+        test_count=$((test_count + 1))
+        echo
+        if $test_func; then
+            pass_count=$((pass_count + 1))
+        else
+            fail_count=$((fail_count + 1))
+            log_error "Test '$test_func' failed"
+        fi
+    done
+
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+
+    echo
+    log_info "=== Deployment Verification Summary ==="
+    echo "Total tests: $test_count"
+    echo "Passed: $pass_count"
+    echo "Failed: $fail_count"
+    echo "Duration: ${duration}s"
+    echo
+
+    if [ $fail_count -eq 0 ]; then
+        log_success "🎉 All deployment verification tests passed!"
+        echo
+        log_info "✅ Deployment is ready for production"
+        log_info "✅ All core functionality verified"
+        log_info "✅ Performance baseline established"
+        exit 0
+    else
+        log_error "❌ Deployment verification failed: $fail_count test(s) failed"
+        echo
+        log_error "Please review the failed tests above and fix issues before deploying to production"
+        exit 1
+    fi
+}
+
+# Show usage
+show_usage() {
+    echo "Usage: $0 [options]"
+    echo
+    echo "Options:"
+    echo "  --api-url URL       API base URL (default: $API_BASE_URL)"
+    echo "  --timeout SEC       Request timeout (default: $TIMEOUT)"
+    echo "  --retries NUM       Number of retries (default: $RETRIES)"
+    echo "  --skip-load-tests   Skip load tests"
+    echo "  --help             Show this help"
+    echo
+    echo "Environment variables:"
+    echo "  API_BASE_URL       Same as --api-url"
+    echo "  SKIP_LOAD_TESTS    Same as --skip-load-tests"
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --api-url)
+            API_BASE_URL="$2"
+            shift 2
+            ;;
+        --timeout)
+            TIMEOUT="$2"
+            shift 2
+            ;;
+        --retries)
+            RETRIES="$2"
+            shift 2
+            ;;
+        --skip-load-tests)
+            SKIP_LOAD_TESTS=true
+            shift
+            ;;
+        --help)
+            show_usage
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            show_usage
+            exit 1
+            ;;
+    esac
+done
+
+# Run main function
+main "$@"
+
+

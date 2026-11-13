@@ -1,0 +1,227 @@
+import path from 'node:path';
+
+import { defineCommand } from '../core/registry.mjs';
+import { CliError, EXIT, usageError } from '../core/errors.mjs';
+import { run } from '../core/proc.mjs';
+import { buildEnv, fileExists, paths, readJsonFile } from '../core/context.mjs';
+import { collectStackStatus } from './stack.mjs';
+
+/**
+ * script 是 package.json 里的脚本名，用来在跑之前判断这个目标到底存不存在。
+ *
+ * 导出是给契约测试用的：CLI 声称能跑的每个目标，对应的 npm script 必须真实存在。
+ * 不校验的话，删掉一个 script 只会在有人真去跑的时候才炸。
+ */
+export const TARGETS = {
+  cli: {
+    label: 'bazi CLI 自测（退出码契约 / JSON 契约 / 安全闸）',
+    cwd: () => paths.root,
+    script: 'test:cli',
+    args: ['run', 'test:cli'],
+  },
+  lint: {
+    label: 'ESLint',
+    cwd: () => paths.root,
+    script: 'lint',
+    args: ['run', 'lint'],
+  },
+  backend: {
+    label: '后端测试',
+    cwd: () => paths.backend,
+    script: 'test',
+    args: ['test'],
+  },
+  engine: {
+    label: '能力契约验证（拿真实引擎验可复现性声明）',
+    cwd: () => paths.root,
+    script: 'test:engine',
+    args: ['run', 'test:engine'],
+    /**
+     * 唯一需要引擎在跑的目标。不标出来的话，引擎没起时它会退 1（"测试失败"），
+     * 而真实原因是环境未就绪 —— 对 Agent 来说这两者的下一步动作完全相反。
+     */
+    requiresEngine: true,
+  },
+};
+
+// cli 排在最前面：它最快，而且它挂了意味着"你正在用的这个工具本身坏了"，
+// 后面几个目标的结论都不再可信，先看到它比先看到 lint 有用。
+// engine 排在最后：它是唯一需要外部依赖的，本地没起引擎时会被记 skipped。
+const DEFAULT_SET = ['cli', 'lint', 'backend', 'engine'];
+
+/**
+ * 目标不可跑的原因 —— 返回 null 表示可跑。
+ *
+ * 只认 node_modules 是不够的：npm script 被删掉/改名时 `npm run x` 退 1，
+ * 会被记成 failed（"代码有问题"），而真实原因是这个目标压根不存在（环境/配置问题）。
+ * 两者对 Agent 的下一步动作完全不同，不能混。
+ */
+const blockedReason = async (target, cwd) => {
+  if (!fileExists(path.join(cwd, 'node_modules'))) {
+    return { reason: `${cwd} 依赖未安装`, next: 'bazi setup' };
+  }
+  if (target.requiresEngine) {
+    const status = await collectStackStatus(buildEnv());
+    if (!status.ready) {
+      return { reason: '本地引擎未就绪（这个目标要打真实引擎）', next: 'bazi stack up' };
+    }
+  }
+  if (!target.script) return null;
+  const pkg = readJsonFile(path.join(cwd, 'package.json'));
+  if (!pkg) return { reason: `${cwd}/package.json 读不到`, next: 'bazi doctor --json' };
+  if (!pkg.scripts?.[target.script]) {
+    return {
+      reason: `${path.relative(paths.root, cwd) || '.'}/package.json 里没有 "${target.script}" 脚本`,
+      next: 'bazi help test --json',
+    };
+  }
+  return null;
+};
+
+/**
+ * 测试进程的环境刻意不注入 .env。
+ *
+ * 引擎无状态，测试不需要任何外部依赖；灌进 .env 只会让"本机能过、CI 过不了"这类
+ * 问题变得更难查 —— 测试看到的环境应该尽量接近 CI 里那个干净的环境。
+ */
+const buildTestEnv = () => ({ ...process.env });
+
+export const testCommand = defineCommand({
+  name: 'test',
+  summary: '跑测试（cli / lint / backend / engine）',
+  // 测试本身是检查，但它 spawn 的 npm script 可以写任何东西（覆盖率产物等）。
+  effect: 'local-write',
+  description:
+    '不带参数把四个目标全跑一遍。\n' +
+    '前三个不需要任何外部服务（引擎无状态，测试不碰数据库）；\n' +
+    'engine 是唯一要引擎在跑的目标 —— 它拿真实引擎验证能力命令的可复现性声明，\n' +
+    '引擎没起时记 skipped 而不是 failed。',
+  usage: 'bazi test [目标...] [-- 透传给底层的参数]',
+  args: [{ name: 'targets', variadic: true, summary: '要跑的目标', choices: Object.keys(TARGETS) }],
+  flags: [
+    { name: 'bail', type: 'boolean', summary: '第一个失败就停，不跑后面的' },
+    {
+      name: 'fail-on-skip',
+      type: 'boolean',
+      summary: '有目标因依赖缺失被跳过时也算失败（CI 用，避免"什么都没跑"报成通过）',
+    },
+  ],
+  examples: [
+    { note: '提交前的快检查', command: 'bazi test --json' },
+    { note: '只看后端', command: 'bazi test backend' },
+    { note: '把参数透传给底层 runner', command: 'bazi test backend -- --test-name-pattern=zodiac' },
+  ],
+  run: async ({ positionals, passthrough, flags, out }) => {
+    const bad = positionals.filter((p) => !TARGETS[p]);
+    if (bad.length) {
+      throw usageError(`未知测试目标：${bad.join(', ')}`, {
+        next: `可选：${Object.keys(TARGETS).join(' / ')}`,
+      });
+    }
+    const targets = positionals.length ? positionals : DEFAULT_SET;
+
+    if (passthrough.length && targets.length > 1) {
+      throw usageError('`--` 透传参数只能配单个目标使用', {
+        next: `bazi test ${targets[0]} -- ${passthrough.join(' ')}`,
+      });
+    }
+
+    const env = buildTestEnv();
+    const results = [];
+
+    for (const name of targets) {
+      const target = TARGETS[name];
+      const cwd = target.cwd();
+      const blocked = await blockedReason(target, cwd);
+      if (blocked) {
+        results.push({
+          target: name,
+          status: 'skipped',
+          reason: blocked.reason,
+          next: blocked.next,
+        });
+        out.warn(`${name}: ${blocked.reason}，跳过（${blocked.next}）`);
+        continue;
+      }
+      if (flags['dry-run']) {
+        results.push({ target: name, status: 'dry-run', command: `npm ${target.args.join(' ')}` });
+        continue;
+      }
+
+      out.step(`${name} — ${target.label}`);
+      const startedAt = Date.now();
+      const result = await run(
+        'npm',
+        [...target.args, ...(passthrough.length ? ['--', ...passthrough] : [])],
+        {
+          cwd,
+          env,
+          stdio: out.childStdio,
+        }
+      );
+      const durationMs = Date.now() - startedAt;
+      const passed = result.code === 0;
+      results.push({
+        target: name,
+        status: passed ? 'passed' : 'failed',
+        exitCode: result.code,
+        durationMs,
+        // json 模式下子进程输出被 pipe 走了，失败时把尾巴带回来，否则 Agent 什么都看不到
+        output: passed
+          ? undefined
+          : `${result.stdout}\n${result.stderr}`.trim().slice(-4000) || undefined,
+      });
+      if (!passed && flags.bail) {
+        out.warn(`${name} 失败，--bail 生效，停止后续目标`);
+        break;
+      }
+    }
+
+    const failed = results.filter((r) => r.status === 'failed');
+    const skipped = results.filter((r) => r.status === 'skipped');
+    const data = {
+      targets,
+      results,
+      summary: {
+        passed: results.filter((r) => r.status === 'passed').length,
+        failed: failed.length,
+        skipped: skipped.length,
+      },
+    };
+
+    const render = (d) =>
+      d.results
+        .map(
+          (r) =>
+            `${out.statusIcon(r.status === 'passed' ? 'ok' : r.status === 'failed' ? 'fail' : 'skip')} ${r.target.padEnd(10)}${r.status}${r.durationMs ? ` (${Math.round(r.durationMs / 1000)}s)` : ''}`
+        )
+        .join('\n');
+
+    if (failed.length) {
+      out.render(data, render);
+      throw new CliError(`${failed.length} 个测试目标失败`, {
+        exit: EXIT.FAILED,
+        code: 'tests_failed',
+        hint: failed.map((f) => f.target).join(', '),
+        next: `bazi test ${failed[0].target}   # 单独重跑看完整输出`,
+        details: data,
+      });
+    }
+
+    // 依赖没装导致的跳过默认只是 warn，本地开发不该被它卡住。
+    // 但 CI 里"什么都没跑"和"全跑过了"都返回 0 是最危险的绿灯，所以给一个显式开关。
+    // 退出码用 ENV 而不是 FAILED：跳过的原因是环境未就绪，该去装依赖而不是查代码。
+    if (skipped.length && flags['fail-on-skip']) {
+      out.render(data, render);
+      throw new CliError(`${skipped.length} 个测试目标未就绪被跳过`, {
+        exit: EXIT.ENV,
+        code: 'targets_skipped',
+        hint: skipped.map((s) => `${s.target}: ${s.reason}`).join('; '),
+        next: skipped[0].next || 'bazi setup',
+        details: data,
+      });
+    }
+
+    return out.ok(data, render);
+  },
+});

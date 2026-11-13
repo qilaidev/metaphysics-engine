@@ -1,0 +1,259 @@
+name: CI
+
+on:
+  push:
+    branches: ['master', 'main']
+  pull_request:
+    branches: ['master', 'main']
+
+# The engine is stateless: no database, no migrations, no fixtures. This job used to
+# provision a PostgreSQL service and run `prisma migrate reset` before the tests; both went
+# away with the storage layer. Nothing here needs a service container any more, which is
+# also why the whole run is now a couple of minutes shorter.
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        # The project requires Node 20+ (see README and docs); testing 18 verified a
+        # version that is not supported.
+        node-version: [20.x, 22.x]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap and dependency-free, so it runs before anything is installed. Guards against
+      # re-committing the verification screenshots and database fixtures that had grown the
+      # history to 735MB for a 5MB source tree.
+      - name: Check no build/test artifacts are committed
+        run: ./scripts/check-repo-artifacts.sh
+
+      - name: Check docs do not advertise deleted CLI or the wrong remote
+        run: ./scripts/check-docs.sh
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+
+      - name: Install Backend Dependencies
+        run: |
+          cd backend
+          npm ci
+
+      # ESLint and Prettier are configured at the repository root, not in backend/.
+      # This step used to run `npm run lint --if-present` inside backend/, where no
+      # lint script exists, so it always passed without checking anything.
+      - name: Lint & Format Check
+        run: |
+          npm ci
+          npm run lint
+          npm run format:check
+
+      - name: Check env template covers every variable the code reads
+        run: ./scripts/check-env-template.sh
+
+      # docs/openapi.json is generated from services/apiSchema.service.js. Regenerating it
+      # here and failing on a diff is what keeps the committed artifact from going stale —
+      # the file is what external consumers read, and nobody notices a stale one by looking.
+      - name: Check the committed OpenAPI snapshot is up to date
+        run: |
+          npm -C backend run generate:openapi
+          git diff --exit-code -- docs/openapi.json
+
+      # Runtime dependencies only: a vulnerability in a build-time devDependency does not
+      # ship, and letting those fail the build is how audit gates get switched off. `high`
+      # is the threshold because moderate advisories in this tree are routinely
+      # unreachable ones, and a gate that cries wolf stops being read.
+      - name: Audit production dependencies
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm --prefix backend audit --omit=dev --audit-level=high
+
+      # The test scripts pass a shell glob, not a quoted one. `node --test "dir/**/*.test.js"`
+      # only expands the pattern itself on Node 21+; on Node 20 it is taken literally, the
+      # runner reports "Could not find" and exits 1. That is exactly what happened here: the
+      # 20.x leg of this matrix never actually ran the backend suite.
+      - name: Run Backend Tests
+        run: |
+          cd backend
+          NODE_ENV=test npm test
+
+      # A coverage script with no threshold is a report nobody reads. The gate is what
+      # turns it into a signal: it fails the build when coverage drops below the floor.
+      # Thresholds sit a couple of points under the current numbers (92.65 / 83.62 / 91.43)
+      # so ordinary churn does not go red, but a real regression does.
+      #
+      # 22.x only: `--test-coverage-lines` and friends landed in Node 22.8. On the 20.x leg
+      # they are unknown options and the process exits before running a single test — which
+      # would look like a test failure rather than an unsupported flag. The suite itself
+      # still runs on both legs above; only the gate is version-gated.
+      #
+      # `--test-coverage-exclude=test/**` matters more than it looks: counting the test
+      # files themselves pulls the total up by ~3 points (95.45 vs 92.65 lines), so without
+      # it the gate would be measuring the tests' own coverage of themselves.
+      - name: Enforce backend coverage thresholds
+        if: matrix.node-version == '22.x'
+        run: |
+          cd backend
+          NODE_ENV=test npm run test:coverage:gate
+
+      # The CLI is how every workflow in this repo is driven, so a break in it blocks
+      # all of them. Its own contract tests are fast and need no services.
+      - name: Run CLI Contract Tests
+        run: npm run test:cli
+
+      # The only target that needs a live engine. It verifies that the reproducibility
+      # declared in the exported tool schema actually holds — the one piece of that
+      # metadata that can be wrong without producing any symptom until a caller uses a
+      # "deterministic" capability as a regression baseline and gets a diff the next day.
+      # `stack up` is idempotent and needs no .env: in development mode the engine has no
+      # required variables. Failing to start is itself a CI failure, which is what we want.
+      - name: Verify capability contract against a live engine
+        run: |
+          ./bazi stack up --json
+          npm run test:engine
+          ./bazi stack down --json
+
+  # Everything above runs the engine from a source checkout, in development or test mode.
+  # Production is a different program: NODE_ENV=production turns on code paths nothing else
+  # reaches, and the artifact operators actually deploy is an image, not this checkout.
+  #
+  # Two shipped defects lived in exactly that blind spot. backend/Dockerfile still copied a
+  # prisma/ directory and ran a prisma:generate script that were deleted with the storage
+  # layer, so the image could not build at all. And config/redis.js threw on a production
+  # boot without REDIS_URL — a session-layer leftover — which made /health, /api/ready and
+  # /metrics answer 500, so a load balancer would never route to the instance. Both were
+  # invisible to a green test suite.
+  #
+  # This job closes that gap by exercising the real artifact in the real mode. It runs
+  # WITHOUT Redis on purpose: that is the configuration the documentation calls optional and
+  # the one that was broken. Note the container does not inherit the runner's CI=true, so it
+  # sees production exactly as a deployed instance does.
+  image:
+    name: Image Build & Production Smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build context is the repository root, matching docker-compose.prod.yml.
+      - name: Build the production image
+        run: docker build -f backend/Dockerfile -t metaphysics-engine:ci .
+
+      - name: Start the container in production mode, without Redis
+        run: |
+          docker run -d --name metaphysics-ci -p 4000:4000 \
+            -e NODE_ENV=production \
+            -e PORT=4000 \
+            -e BIND_HOST=0.0.0.0 \
+            -e DOCS_PASSWORD=ci-docs-password \
+            -e METRICS_TOKEN=ci-metrics-token \
+            -e BACKEND_BASE_URL=https://api.example.com \
+            -e CORS_ALLOWED_ORIGINS=https://app.example.com \
+            -e TRUST_PROXY=1 \
+            -e SHUTDOWN_DRAIN_MS=1000 \
+            metaphysics-engine:ci
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4000/live >/dev/null 2>&1; then
+              echo "engine is up"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "engine never became live" >&2
+          docker logs metaphysics-ci >&2
+          exit 1
+
+      - name: Probe endpoints answer as documented
+        run: |
+          set -euo pipefail
+
+          expect() {
+            local label=$1 expected=$2
+            shift 2
+            local actual
+            actual=$(curl -s -o /dev/null -w '%{http_code}' "$@")
+            if [ "$actual" != "$expected" ]; then
+              echo "FAIL ${label}: expected ${expected}, got ${actual}" >&2
+              return 1
+            fi
+            echo "ok   ${label}: ${actual}"
+          }
+
+          # The three that returned 500 on a Redis-less production boot.
+          expect "/live"        200 http://127.0.0.1:4000/live
+          expect "/health"      200 http://127.0.0.1:4000/health
+          expect "/api/ready"   200 http://127.0.0.1:4000/api/ready
+
+          # An unconfigured optional cache is "disabled", which is healthy — not a
+          # dependency failure that should hold the instance out of service.
+          curl -fsS http://127.0.0.1:4000/health \
+            | grep -q '"redis":{"ok":true,"status":"disabled"}'
+          echo "ok   /health reports redis as disabled-but-healthy"
+
+          # Security defaults: both of these are unauthenticated-by-accident risks.
+          expect "/metrics (no token)"   401 http://127.0.0.1:4000/metrics
+          expect "/metrics (token)"      200 -H 'Authorization: Bearer ci-metrics-token' http://127.0.0.1:4000/metrics
+          expect "/api-docs.json (anon)" 401 http://127.0.0.1:4000/api-docs.json
+
+          # The engine's actual job, through the real image.
+          curl -fsS -X POST http://127.0.0.1:4000/api/bazi/calculate \
+            -H 'Content-Type: application/json' \
+            -d '{"birthYear":1993,"birthMonth":6,"birthDay":18,"birthHour":12,"gender":"male"}' \
+            | grep -q '"pillars"'
+          echo "ok   /api/bazi/calculate returns a chart"
+
+          # The request metrics are what make a "process is up but every request fails"
+          # outage visible at all, and they are only worth anything if the middleware is
+          # actually mounted in the shipped image — a unit test cannot tell you that.
+          # Asserted right after the calculation above, so the 2xx counter has something
+          # real to have counted.
+          metrics=$(curl -fsS -H 'Authorization: Bearer ci-metrics-token' http://127.0.0.1:4000/metrics)
+
+          echo "$metrics" | grep -q '^# TYPE bazi_http_requests_total counter'
+          echo "$metrics" | grep -q '^# TYPE bazi_http_request_duration_seconds histogram'
+          echo "ok   /metrics exposes the request families"
+
+          # Every status class present even at zero: an absent series makes an error-rate
+          # alert unable to fire until after the first error.
+          for cls in 2xx 3xx 4xx 5xx; do
+            echo "$metrics" | grep -q "^bazi_http_requests_total{status_class=\"${cls}\"} " \
+              || { echo "FAIL: status_class=${cls} missing" >&2; exit 1; }
+          done
+          echo "ok   /metrics emits all four status classes"
+
+          served=$(echo "$metrics" | sed -n 's/^bazi_http_requests_total{status_class="2xx"} //p')
+          [ "${served:-0}" -ge 1 ] \
+            || { echo "FAIL: the chart request above was not counted (2xx=${served:-unset})" >&2; exit 1; }
+          echo "ok   /metrics counted the chart request (2xx=${served})"
+
+          # Probes must stay out of the counters, or in a quiet hour they become most of
+          # the traffic and dilute both the error rate and the latency histogram. /live was
+          # polled repeatedly by the readiness loop above, so this is a real check.
+          probes=$(echo "$metrics" | sed -n 's/^bazi_http_request_duration_seconds_count //p')
+          [ "${probes:-0}" -le 3 ] \
+            || { echo "FAIL: probe traffic is being counted (count=${probes})" >&2; exit 1; }
+          echo "ok   /metrics excludes probe traffic (count=${probes})"
+
+      # scripts/start.mjs is PID 1 and exists solely to forward SIGTERM. If that forwarding
+      # regresses, the container is SIGKILLed at the end of the grace period and in-flight
+      # requests are cut — visible only as a nonzero exit code, which is what this asserts.
+      - name: Graceful shutdown leaves a clean exit code
+        run: |
+          set -euo pipefail
+          docker stop -t 30 metaphysics-ci >/dev/null
+          code=$(docker inspect -f '{{.State.ExitCode}}' metaphysics-ci)
+          echo "container exit code: ${code}"
+          [ "$code" = "0" ]
+
+      - name: Container logs
+        if: always()
+        run: docker logs metaphysics-ci || true

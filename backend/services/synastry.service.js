@@ -1,0 +1,260 @@
+/**
+ * 合盘：两张八字盘之间的关系。
+ *
+ * 以日支（夫妻宫）干支关系为主位，兼日主十神与交叉柱合冲刑害；
+ * 不是五行粗比。score 由 WEIGHTS 折算，insights 只陈述关系事实，不下断语。
+ * 口径真源：constants/rulings.js 的 SYNASTRY_RULINGS。
+ */
+
+import { STEMS_MAP, BRANCHES_MAP, ELEMENTS } from '../constants/stems.js';
+import { withSchool } from '../constants/rulings.js';
+import { getElementRelation, getTenGod } from './bazi.service.js';
+import { detectBranchRelations, getNayin } from './ganzhi.service.js';
+
+/**
+ * 各项关系的计分权重。
+ *
+ * 日支（夫妻宫）之间的关系权重最高，这是合婚的主位；日主次之；其余柱位再次。
+ * 合与冲不是简单的「好」与「坏」—— 冲主动荡、合主亲近，但过合亦有牵绊，
+ * 所以这里只按「和谐度」折算成一个可比的数，具体吉凶留给调用方。
+ */
+const WEIGHTS = {
+  dayBranchSixCombination: 30,
+  dayBranchHalfCombination: 15,
+  dayBranchClash: -20,
+  dayBranchPunishment: -15,
+  dayBranchHarm: -10,
+  dayBranchDestruction: -8,
+  dayMasterGenerates: 25,
+  dayMasterSame: 18,
+  dayMasterControls: 8,
+  crossPillarCombination: 5,
+  crossPillarClash: -5,
+  crossPillarDiscord: -3,
+  elementComplement: 10,
+};
+
+/**
+ * 夫妻宫两支之间可能成立的全部关系。
+ *
+ * 这里**不含三合**：三合要三支才成局，两个人的日支之间无论如何凑不出来，
+ * 挂一条三合权重只会让人以为引擎考虑了它。两支能成的是半合，已单列。
+ */
+const SPOUSE_RELATION_WEIGHTS = [
+  { source: 'sixCombinations', type: 'sixCombination', weight: 'dayBranchSixCombination' },
+  { source: 'halfCombinations', type: 'halfCombination', weight: 'dayBranchHalfCombination' },
+  { source: 'clashes', type: 'clash', weight: 'dayBranchClash' },
+  { source: 'punishments', type: 'punishment', weight: 'dayBranchPunishment' },
+  { source: 'harms', type: 'harm', weight: 'dayBranchHarm' },
+  { source: 'destructions', type: 'destruction', weight: 'dayBranchDestruction' },
+];
+
+const PILLARS = ['year', 'month', 'day', 'hour'];
+
+const pillarChars = (chart) =>
+  PILLARS.map((position) => ({
+    position,
+    stem: chart.pillars?.[position]?.charStem,
+    branch: chart.pillars?.[position]?.charBranch,
+  })).filter((p) => p.stem && p.branch);
+
+/**
+ * 夫妻宫：两人日支之间的关系。合婚的主位，单独拎出来算。
+ */
+const analyzeSpousePalace = (branchA, branchB) => {
+  if (!branchA || !branchB) return null;
+  const relations = detectBranchRelations([branchA, branchB]);
+  const found = [];
+
+  SPOUSE_RELATION_WEIGHTS.forEach(({ source, type, weight }) => {
+    (relations[source] || []).forEach((relation) =>
+      found.push({
+        type,
+        cn: relation.cn,
+        ...(relation.transform ? { transform: relation.transform } : {}),
+        weight: WEIGHTS[weight],
+      })
+    );
+  });
+
+  return {
+    branchA,
+    branchB,
+    elementA: BRANCHES_MAP[branchA]?.element || null,
+    elementB: BRANCHES_MAP[branchB]?.element || null,
+    relations: found,
+  };
+};
+
+/** 日主之间：五行生克 + 互看十神。 */
+const analyzeDayMasters = (stemA, stemB) => {
+  if (!stemA || !stemB) return null;
+  const elementA = STEMS_MAP[stemA]?.element;
+  const elementB = STEMS_MAP[stemB]?.element;
+  const relation = getElementRelation(elementA, elementB);
+
+  let weight = 0;
+  if (relation === 'Generates' || relation === 'GeneratedBy') weight = WEIGHTS.dayMasterGenerates;
+  else if (relation === 'Same') weight = WEIGHTS.dayMasterSame;
+  else if (relation === 'Controls' || relation === 'ControlledBy')
+    weight = WEIGHTS.dayMasterControls;
+
+  return {
+    stemA,
+    stemB,
+    elementA,
+    elementB,
+    relation,
+    // 互看十神：A 眼中的 B 是什么，B 眼中的 A 是什么，两边并不对称
+    tenGodAtoB: getTenGod(stemA, stemB),
+    tenGodBtoA: getTenGod(stemB, stemA),
+    weight,
+  };
+};
+
+/**
+ * 四柱交叉：A 的每一柱地支与 B 的每一柱地支之间的关系。
+ *
+ * **跳过日支与日支那一对** —— 它是夫妻宫，已由 analyzeSpousePalace 按主位权重
+ * 单独计过。不跳过的话同一个六合会被计两次分（30 分 + 5 分），日支关系越强，
+ * 分数虚高得越多。
+ */
+const CROSS_RELATION_KINDS = [
+  { source: 'sixCombinations', type: 'sixCombination', weight: 'crossPillarCombination' },
+  { source: 'halfCombinations', type: 'halfCombination', weight: 'crossPillarCombination' },
+  { source: 'clashes', type: 'clash', weight: 'crossPillarClash' },
+  { source: 'punishments', type: 'punishment', weight: 'crossPillarDiscord' },
+  { source: 'harms', type: 'harm', weight: 'crossPillarDiscord' },
+  { source: 'destructions', type: 'destruction', weight: 'crossPillarDiscord' },
+];
+
+const analyzeCrossPillars = (charsA, charsB) => {
+  const found = [];
+  charsA.forEach((a) => {
+    charsB.forEach((b) => {
+      if (a.position === 'day' && b.position === 'day') return;
+      const relations = detectBranchRelations([a.branch, b.branch]);
+      CROSS_RELATION_KINDS.forEach(({ source, type, weight }) => {
+        (relations[source] || []).forEach((relation) =>
+          found.push({
+            a: a.position,
+            b: b.position,
+            type,
+            cn: relation.cn,
+            weight: WEIGHTS[weight],
+          })
+        );
+      });
+    });
+  });
+  return found;
+};
+
+/**
+ * 五行互补：一方所缺，另一方是否补得上。
+ *
+ * 用的是 analysis.weightedElements（藏干加权）而非旧的干支个数百分比 ——
+ * 后者把「地支只数本气」的粗略统计当成了五行分布，缺什么补什么因此常判错。
+ * 拿不到加权数据时退回百分比，并在返回里标出用的是哪一种。
+ */
+const analyzeElementComplement = (chartA, chartB) => {
+  const pick = (chart) => {
+    const weighted = chart.analysis?.weightedElements?.percent;
+    if (weighted) return { source: 'weighted', percent: weighted };
+    return { source: 'countBased', percent: chart.fiveElementsPercent || {} };
+  };
+
+  const a = pick(chartA);
+  const b = pick(chartB);
+  const supplies = [];
+
+  const check = (lacking, supplier, direction) => {
+    ELEMENTS.forEach((element) => {
+      const own = lacking.percent[element] || 0;
+      const other = supplier.percent[element] || 0;
+      if (own < 10 && other > 30) {
+        supplies.push({ element, direction, ownPercent: own, otherPercent: other });
+      }
+    });
+  };
+  check(a, b, 'BtoA');
+  check(b, a, 'AtoB');
+
+  return { source: a.source === b.source ? a.source : 'mixed', supplies };
+};
+
+export const calculateCompatibility = (chartA, chartB) => {
+  if (!chartA || !chartB || !chartA.pillars || !chartB.pillars) {
+    throw new Error('Invalid chart data for comparison');
+  }
+
+  const charsA = pillarChars(chartA);
+  const charsB = pillarChars(chartB);
+  const dayA = chartA.pillars.day;
+  const dayB = chartB.pillars.day;
+
+  const dayMasters = analyzeDayMasters(dayA?.charStem, dayB?.charStem);
+  const spousePalace = analyzeSpousePalace(dayA?.charBranch, dayB?.charBranch);
+  const crossPillars = analyzeCrossPillars(charsA, charsB);
+  const elementComplement = analyzeElementComplement(chartA, chartB);
+
+  // 计分：基准 50，各项关系按权重增减，最后夹到 0..100
+  let score = 50;
+  const insights = [];
+
+  if (dayMasters) {
+    score += dayMasters.weight;
+    insights.push({
+      area: 'dayMaster',
+      cn: `日主 ${dayMasters.stemA} 与 ${dayMasters.stemB}：${dayMasters.relation}`,
+      detail: `互看十神 ${dayMasters.tenGodAtoB?.cn || '?'} / ${dayMasters.tenGodBtoA?.cn || '?'}`,
+    });
+  }
+
+  (spousePalace?.relations || []).forEach((relation) => {
+    score += relation.weight;
+    insights.push({ area: 'spousePalace', cn: `夫妻宫${relation.cn}`, type: relation.type });
+  });
+
+  crossPillars.forEach((relation) => {
+    score += relation.weight;
+    insights.push({
+      area: 'crossPillar',
+      type: relation.type,
+      cn: `${relation.a}柱与对方${relation.b}柱${relation.cn}`,
+    });
+  });
+
+  elementComplement.supplies.forEach((supply) => {
+    score += WEIGHTS.elementComplement;
+    insights.push({
+      area: 'elementComplement',
+      cn: `${supply.direction === 'BtoA' ? '乙方' : '甲方'}补${supply.element}`,
+      detail: `对方 ${supply.otherPercent}% / 自身 ${supply.ownPercent}%`,
+    });
+  });
+
+  return withSchool('synastry', {
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    insights,
+    dayMasters,
+    spousePalace,
+    crossPillars,
+    elementComplement,
+    nayin: {
+      a: getNayin(dayA?.charStem, dayA?.charBranch),
+      b: getNayin(dayB?.charStem, dayB?.charBranch),
+    },
+    // 计分口径随代码走，调用方要自定权重时照这份改
+    weights: WEIGHTS,
+    details: {
+      dayMasterRelation: dayMasters
+        ? `${dayMasters.elementA} 与 ${dayMasters.elementB}：${dayMasters.relation}`
+        : '',
+      dayBranchRelation: spousePalace
+        ? spousePalace.relations.map((r) => r.cn).join('、') || '无合无冲'
+        : '',
+      elementBalance: `互补 ${elementComplement.supplies.length} 项（${elementComplement.source}）`,
+    },
+  });
+};

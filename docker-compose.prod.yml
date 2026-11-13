@@ -1,0 +1,173 @@
+# 生产参考栈：引擎 + 一个可选的 Redis 缓存 + 一个 autoheal 观察者。
+#
+# 这里以前还有一个 postgres 服务和一整套备份 cron。引擎收敛成无状态纯计算之后，
+# 它不存任何数据，也就没有什么需要备份、迁移或恢复的东西 —— 那些服务连同存储层一起删掉了。
+# 现在整个栈可以随时整体销毁重建，唯一会丢的是 Redis 里的排盘缓存（重算即可）。
+#
+# Docker 默认的 json-file 日志驱动没有大小上限，所以下面每个服务都钉一个，
+# 否则宿主磁盘会在几周内被日志吃满。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '20m'
+    max-file: '5'
+
+services:
+  # 纯缓存，可以整个删掉：不配 REDIS_URL 时每个实例各用自己的进程内缓存，
+  # 排盘结果完全一致，只是跨实例命中率低一些。
+  redis:
+    image: redis:7
+    container_name: bazi_redis
+    restart: always
+    logging: *default-logging
+    # 默认配置有两个会在生产上咬人的缺省值：
+    #   1. 没有 maxmemory —— key 只受各自 TTL 约束，流量一大就一路涨到把宿主内存吃光。
+    #      撞上 Docker 内存限额时是整个容器被 OOM killer 干掉。
+    #   2. 默认淘汰策略是 noeviction —— 内存到顶后写命令直接报错。对纯缓存来说这是
+    #      最差的一种失败方式：本该悄悄降级成 miss，结果变成显式报错。
+    # 这里所有 key 都带 TTL，所以用 volatile-lru：先淘汰最久没用的、本来就会过期的 key。
+    #
+    # 不开 appendonly：里面只有排盘缓存，重启丢光也只是下一次重算一遍，
+    # 为它付 AOF 的写放大和 fork 内存开销不划算。
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - volatile-lru
+      - --save
+      - ''
+    deploy:
+      resources:
+        limits:
+          memory: ${REDIS_MEMORY_LIMIT:-512m}
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    stop_grace_period: 15s
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: bazi_backend
+    restart: always
+    logging: *default-logging
+    depends_on:
+      redis:
+        condition: service_healthy
+    # 这份清单必须覆盖 backend 代码真实读取的每一个变量，否则运维在 .env.production 里
+    # 配了也传不进容器。scripts/check-env-template.sh 在 CI 里守着模板那一侧。
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      BIND_HOST: ${BIND_HOST:-0.0.0.0}
+      REDIS_URL: redis://redis:6379
+      REDIS_CONNECT_TIMEOUT_MS: ${REDIS_CONNECT_TIMEOUT_MS:-}
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL}
+      ALLOW_LOCALHOST_PROD: ${ALLOW_LOCALHOST_PROD:-false}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      TRUST_PROXY: ${TRUST_PROXY:-}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      AI_PROVIDER: ${AI_PROVIDER:-}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-}
+      AI_TIMEOUT_MS: ${AI_TIMEOUT_MS:-}
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-}
+      GRACEFUL_SHUTDOWN_TIMEOUT_MS: ${GRACEFUL_SHUTDOWN_TIMEOUT_MS:-}
+      SHUTDOWN_DRAIN_MS: ${SHUTDOWN_DRAIN_MS:-}
+      SERVER_KEEP_ALIVE_TIMEOUT_MS: ${SERVER_KEEP_ALIVE_TIMEOUT_MS:-}
+      SERVER_HEADERS_TIMEOUT_MS: ${SERVER_HEADERS_TIMEOUT_MS:-}
+      SERVER_REQUEST_TIMEOUT_MS: ${SERVER_REQUEST_TIMEOUT_MS:-}
+      DOCS_USER: ${DOCS_USER:-}
+      # 生产模式下唯一的硬性必填项：没有默认值，缺了它这个栈就不该起来。
+      DOCS_PASSWORD: ${DOCS_PASSWORD:?DOCS_PASSWORD is required}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      JSON_BODY_LIMIT: ${JSON_BODY_LIMIT:-}
+      MAX_URL_LENGTH: ${MAX_URL_LENGTH:-}
+      MAX_INPUT_ARRAY_LENGTH: ${MAX_INPUT_ARRAY_LENGTH:-}
+      MAX_INPUT_DEPTH: ${MAX_INPUT_DEPTH:-}
+      MAX_INPUT_KEYS: ${MAX_INPUT_KEYS:-}
+      MAX_INPUT_STRING_LENGTH: ${MAX_INPUT_STRING_LENGTH:-}
+      BAZI_CACHE_TTL_MS: ${BAZI_CACHE_TTL_MS:-}
+      BAZI_CACHE_MAX_ENTRIES: ${BAZI_CACHE_MAX_ENTRIES:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-}
+      SENTRY_PROFILES_SAMPLE_RATE: ${SENTRY_PROFILES_SAMPLE_RATE:-}
+      HEALTH_CACHE_TTL_MS: ${HEALTH_CACHE_TTL_MS:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+    ports:
+      # 默认回环：TLS 终结和公网入口属于 nginx。
+      # 发布到 0.0.0.0 会写 iptables 规则，绕过 ufw/firewalld。
+      - '${BACKEND_BIND_ADDR:-127.0.0.1}:4000:4000'
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY_LIMIT:-1g}
+    # 显式钉死 fd 上限，不去赌 dockerd 继承下来的默认值是多少。撞上 fd 的表现是 EMFILE，
+    # 届时 accept 全线失败，比 OOM 更难查。长连接（WebSocket）和数据库连接池都已移除，
+    # 现在的消耗只剩 HTTP keep-alive 和日志句柄，65536 有极大余量。
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # 必须大于 SHUTDOWN_DRAIN_MS + GRACEFUL_SHUTDOWN_TIMEOUT_MS（默认 5s + 10s），
+    # 否则排水还没走完容器就被 SIGKILL 了。调大排水窗口时这里要跟着调。
+    stop_grace_period: 30s
+    labels:
+      # 把这个容器纳入下面的 autoheal 观察者。`restart: always` 只覆盖进程退出的情况；
+      # 一个还活着但健康检查一直失败的容器（事件循环卡死），compose 自己永远不会重启它。
+      autoheal: 'true'
+    healthcheck:
+      # 这里查的是存活，不是就绪。它驱动 autoheal，所以它测什么，什么就会导致容器被重启。
+      # /api/ready 是*深度*检查：Redis 短暂不可达时它会失败，而为此重启后端是有害的 ——
+      # Redis 只是缓存，摘掉它服务照常工作，重启只会把一次十秒的抖动放大成一轮冷启动。
+      # /live 仍然能抓到 autoheal 真正该管的东西：事件循环卡死时它答不上来。
+      #
+      # /api/ready 留给负载均衡器，它该做的是摘流而不是重启。进程排水期间它也会报 503。
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:4000/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  # 重启任何 autoheal=true 且健康检查报 unhealthy 的容器。
+  # 纯 docker compose 自己从不做这件事 —— 那是 Swarm/Kubernetes 的职责 ——
+  # 没有它的话，一个卡死的后端会一直挂在 unhealthy 状态而没人管。
+  #
+  # 刻意不覆盖 redis：它一挂就重启会把缓存反复清空，而缓存本来就允许 miss，没必要。
+  #
+  # 代价说清楚：它需要 Docker socket，等价于宿主 root 权限。挂成 :ro 并不能限制能通过
+  # 这个 socket 发起什么请求 —— 那只是让文件节点只读 —— 所以把这个容器当特权容器对待，
+  # 并且钉死镜像 tag。如果不能接受，直接删掉这个服务，改用编排层自己的重启策略。
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    container_name: bazi_autoheal
+    restart: always
+    logging: *default-logging
+    network_mode: none
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: ${AUTOHEAL_INTERVAL:-10}
+      AUTOHEAL_START_PERIOD: ${AUTOHEAL_START_PERIOD:-60}
+      # 等待优雅停止的秒数，超过就杀。要 >= 后端的 stop_grace_period（30s），
+      # 否则重启会截断正在处理的请求 —— 那恰好是优雅停机存在的意义。
+      DOCKER_TIMEOUT: ${AUTOHEAL_DOCKER_TIMEOUT:-40}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+# 没有具名卷：栈里已经没有任何需要跨重建保留的状态。
+# Redis 也刻意关掉了持久化（--save ''），它里面只有可以随时重算的排盘缓存。

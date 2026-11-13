@@ -1,0 +1,177 @@
+import { getBaziCacheConfig } from '../config/app.js';
+
+const ELEMENTS = ['Wood', 'Fire', 'Earth', 'Metal', 'Water'];
+const getCacheConfig = () => getBaziCacheConfig();
+const baziCalculationCache = new Map();
+let cacheMirror = null;
+
+export const setBaziCacheMirror = (mirror) => {
+  cacheMirror = mirror;
+};
+
+export const hasBaziCacheMirror = () => Boolean(cacheMirror);
+
+const coerceInt = (value) => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' && value.trim().length === 0) return null;
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return null;
+  return Math.trunc(numberValue);
+};
+
+export const buildBaziCacheKey = (data) => {
+  if (!data) return null;
+  const birthYear = coerceInt(data.birthYear);
+  const birthMonth = coerceInt(data.birthMonth);
+  const birthDay = coerceInt(data.birthDay);
+  const birthHour = coerceInt(data.birthHour);
+  const gender = typeof data.gender === 'string' ? data.gender.trim().toLowerCase() : null;
+
+  if (
+    birthYear === null ||
+    birthMonth === null ||
+    birthDay === null ||
+    birthHour === null ||
+    !gender
+  ) {
+    return null;
+  }
+
+  const base = `${birthYear}-${birthMonth}-${birthDay}-${birthHour}-${gender}`;
+
+  // 真太阳时会按出生地经度与分钟改写时柱，这些因子必须进键，否则「同年月日时不同出生地」
+  // 会互相命中对方的盘。只有在因子确实存在时才追加后缀，保持无地点请求的键与历史一致。
+  const birthMinute = coerceInt(data.birthMinute);
+  const timezoneOffsetMinutes = coerceInt(data.timezoneOffsetMinutes);
+  const birthLocation =
+    typeof data.birthLocation === 'string' ? data.birthLocation.trim().toLowerCase() : '';
+
+  const suffix = [];
+  if (birthMinute) suffix.push(`m${birthMinute}`);
+  if (birthLocation) suffix.push(`loc:${birthLocation}`);
+  if (timezoneOffsetMinutes !== null) suffix.push(`tz${timezoneOffsetMinutes}`);
+  if (typeof data.timezone === 'string' && data.timezone.trim()) {
+    suffix.push(`tzn:${data.timezone.trim()}`);
+  }
+  if (data.trueSolarTime === false) suffix.push('nots');
+
+  return suffix.length ? `${base}|${suffix.join('|')}` : base;
+};
+
+export const buildFiveElementsPercent = (fiveElements) => {
+  if (!fiveElements || typeof fiveElements !== 'object') return null;
+  const total = Object.values(fiveElements).reduce((sum, value) => {
+    const next = Number(value);
+    return sum + (Number.isFinite(next) ? next : 0);
+  }, 0);
+
+  return ELEMENTS.reduce((acc, element) => {
+    const raw = Number(fiveElements[element]);
+    const safe = Number.isFinite(raw) ? raw : 0;
+    acc[element] = total ? Math.round((safe / total) * 100) : 0;
+    return acc;
+  }, {});
+};
+
+export const normalizeBaziResult = (result) => {
+  if (!result || typeof result !== 'object') return result;
+  if (result.fiveElementsPercent || !result.fiveElements) return result;
+  const fiveElementsPercent = buildFiveElementsPercent(result.fiveElements);
+  if (!fiveElementsPercent) return result;
+  return { ...result, fiveElementsPercent };
+};
+
+const isValidBaziCacheValue = (value) => {
+  if (!value || typeof value !== 'object') return false;
+  if (!value.pillars || typeof value.pillars !== 'object') return false;
+  if (!value.fiveElements || typeof value.fiveElements !== 'object') return false;
+  return true;
+};
+
+const pruneBaziCache = () => {
+  const { maxEntries } = getCacheConfig();
+  if (!Number.isFinite(maxEntries) || maxEntries <= 0) {
+    return;
+  }
+  while (baziCalculationCache.size > maxEntries) {
+    const oldestKey = baziCalculationCache.keys().next().value;
+    if (!oldestKey) break;
+    baziCalculationCache.delete(oldestKey);
+    if (cacheMirror?.delete) {
+      cacheMirror.delete(oldestKey);
+    }
+  }
+};
+
+const setLocalEntry = (key, value) => {
+  const normalized = normalizeBaziResult(value);
+  const { ttlMs } = getCacheConfig();
+  const expiresAt = Number.isFinite(ttlMs) && ttlMs > 0 ? Date.now() + ttlMs : null;
+  if (baziCalculationCache.has(key)) {
+    baziCalculationCache.delete(key);
+  }
+  baziCalculationCache.set(key, { value: normalized, expiresAt });
+  pruneBaziCache();
+};
+
+export const getCachedBaziCalculation = (key) => {
+  if (!key) return null;
+  const entry = baziCalculationCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt && entry.expiresAt <= Date.now()) {
+    baziCalculationCache.delete(key);
+    return null;
+  }
+  // Refresh LRU position
+  baziCalculationCache.delete(key);
+  baziCalculationCache.set(key, entry);
+  return entry.value;
+};
+
+export const getCachedBaziCalculationAsync = async (key) => {
+  const cached = getCachedBaziCalculation(key);
+  if (cached) return cached;
+  if (!key || !cacheMirror?.get) return null;
+  const remote = await cacheMirror.get(key);
+  if (!remote) return null;
+  const normalized = normalizeBaziResult(remote);
+  if (!isValidBaziCacheValue(normalized)) {
+    if (cacheMirror?.delete) {
+      cacheMirror.delete(key);
+    }
+    return null;
+  }
+  setLocalEntry(key, normalized);
+  return normalized;
+};
+
+export const setBaziCacheEntry = (key, value) => {
+  if (!key) return;
+  setLocalEntry(key, value);
+  if (cacheMirror?.set) {
+    const { ttlMs } = getCacheConfig();
+    cacheMirror.set(key, normalizeBaziResult(value), ttlMs);
+  }
+};
+
+export const primeBaziCalculationCache = (data, result) => {
+  const key = buildBaziCacheKey(data);
+  if (!key || !result) return;
+  setBaziCacheEntry(key, result);
+};
+
+export const invalidateBaziCalculationCache = (data) => {
+  const key = typeof data === 'string' ? data : buildBaziCacheKey(data);
+  if (!key) return;
+  baziCalculationCache.delete(key);
+  if (cacheMirror?.delete) {
+    cacheMirror.delete(key);
+  }
+};
+
+export const clearBaziCalculationCache = () => {
+  baziCalculationCache.clear();
+  if (cacheMirror?.clear) {
+    cacheMirror.clear();
+  }
+};

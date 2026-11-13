@@ -1,0 +1,74 @@
+{
+  "name": "metaphysics-engine",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Self-hostable, stateless Chinese metaphysics calculation engine — BaZi, Zi Wei Dou Shu, Liu Yao, Da Liu Ren, Qi Men Dun Jia, Ba Zhai feng shui, almanac, name grids, Tarot, I Ching, Zodiac and Synastry — exposed as a documented HTTP API and an agent-callable programmatic CLI.",
+  "license": "MIT",
+  "author": "qilaidev",
+  "homepage": "https://github.com/qilaidev/metaphysics-engine#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qilaidev/metaphysics-engine.git"
+  },
+  "bugs": {
+    "url": "https://github.com/qilaidev/metaphysics-engine/issues"
+  },
+  "keywords": [
+    "metaphysics-engine",
+    "bazi",
+    "ba-zi",
+    "ziwei",
+    "zi-wei-dou-shu",
+    "liuyao",
+    "daliuren",
+    "qimen",
+    "qimen-dunjia",
+    "bazhai",
+    "feng-shui",
+    "tarot",
+    "iching",
+    "i-ching",
+    "zodiac",
+    "synastry",
+    "divination",
+    "chinese-metaphysics",
+    "fortune-telling-api",
+    "agent-callable-cli",
+    "openapi",
+    "nodejs",
+    "express",
+    "self-hosted",
+    "mcp",
+    "八字",
+    "紫微斗数",
+    "六爻",
+    "奇门遁甲",
+    "大六壬",
+    "术数",
+    "命理"
+  ],
+  "engines": {
+    "node": ">=20",
+    "npm": ">=9"
+  },
+  "scripts": {
+    "bazi": "node tools/cli/bin/bazi.mjs",
+    "test": "npm -C backend test",
+    "test:backend": "npm -C backend test",
+    "test:cli": "node --test tools/cli/test/*.test.mjs",
+    "test:engine": "node --test tools/cli/test/engine/*.test.mjs",
+    "lint": "eslint . --ext .js,.mjs,.cjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.5"
+  },
+  "bin": {
+    "bazi": "tools/cli/bin/bazi.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}
