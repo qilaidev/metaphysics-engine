@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Stateless HTTP surface over the BaZi / Zi Wei Dou Shu / Tarot / I Ching / Zodiac / Synastry calculation engine, with OpenAPI, health checks and optional AI providers.",
   "license": "MIT",
+  "author": "qilaidev",
   "homepage": "https://github.com/qilaidev/metaphysics-engine#readme",
   "repository": {
     "type": "git",
