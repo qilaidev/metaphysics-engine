@@ -1,48 +1,51 @@
-# Metaphysics Engine (metaphysics-engine) · 无状态传统术数与排盘算法能力层
+# Metaphysics Engine (`metaphysics-engine`) · 无状态传统术数与排盘算法能力层
 
+[![CI](https://github.com/qilaidev/metaphysics-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/qilaidev/metaphysics-engine/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![OpenAPI 3.0.3](https://img.shields.io/badge/OpenAPI-3.0.3_31_paths-009688.svg)](docs/openapi.json)
+[![MCP Server](https://img.shields.io/badge/MCP-14_Read--Only_Tools-6E56CF.svg)](#调用示例--usage-examples)
+[![Stateless](https://img.shields.io/badge/Architecture-Stateless_Pure_Calc-10B981.svg)](docs/architecture.md)
 
-[English README](README.en.md) · [API Docs](docs/api.md) · [Architecture](docs/architecture.md) · [开发约定](CONTRIBUTING.md) · [Security](SECURITY.md) · [LICENSE](LICENSE) · [llms.txt](llms.txt) · [Changelog](CHANGELOG.md)
+**简体中文** · [English](README.en.md) · [API Docs](docs/api.md) · [OpenAPI](docs/openapi.json) · [Architecture](docs/architecture.md) · [llms.txt](llms.txt) · [CodeMeta](codemeta.json) · [开发约定](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [LICENSE](LICENSE)
 
 > 本仓库为开源的术数算法能力层（MIT）。它与带 React 前端的社区 Web UI 全栈模板（冻结在 `v0.2.0`）是两个完全隔离、
 > 互不同步的独立仓库：算法口径、CLI 能力与 MCP 接入均不共享，也不沿用那条线的任何代码或资产。
 
-Metaphysics Engine 是一个开源的命理计算引擎，把中国传统术数的排盘能力——八字（BaZi）、紫微斗数（Zi Wei Dou Shu）、六爻纳甲（Liu Yao）、大六壬（Da Liu Ren）、奇门遁甲（Qi Men Dun Jia）、八宅风水（Ba Zhai）、择吉（almanac）、姓名五格——连同塔罗、周易起卦、星座与上升星座、合盘分析和 AI 解读，收敛成一套文档化的 HTTP API 和一个面向 Agent 的程序化 CLI。
+**Metaphysics Engine（`metaphysics-engine`）** 是一个开源（MIT）、可自部署的无状态传统术数与占星计算能力层，基于 Node.js 20+ 与 Express 4 构建。它将八字排盘（BaZi）、紫微斗数（Zi Wei Dou Shu）、六爻纳甲（Liu Yao）、大六壬（Da Liu Ren）、奇门遁甲（Qi Men Dun Jia）、八宅风水（Ba Zhai）、三层择吉黄历（Almanac）、姓名五格、塔罗、周易起卦、西洋星座与上升星座、合盘分析及可选 AI 解读收敛为 **31 个公开 OpenAPI 3.0.3 接口**、面向 Agent 的 **`./bazi --json` CLI** 与 **14 工具只读 stdio MCP Server**——零数据库、零账号系统、全部流派口径在 [`backend/constants/rulings.js`](backend/constants/rulings.js) 显式声明。
 
-它是**算法能力层**，不是网页应用，也不服务 C 端用户：界面、账号、持久化都属于调用方。引擎本身是无状态纯计算——不存数据、不认用户、没有数据库。
+**English definition**: **Metaphysics Engine** is an open-source (MIT), self-hostable, stateless Chinese metaphysics and astrology calculation capability layer built on Node.js and Express. It exposes 14 traditional and divination modules — BaZi (with True Solar Time), Zi Wei Dou Shu, King Fang Liu Yao, Da Liu Ren, Qi Men Dun Jia, Ba Zhai feng shui, almanac, name grids, Tarot, I Ching, Zodiac/Ascendant, and Synastry — through 31 OpenAPI 3.0.3 HTTP routes, a `--json` programmatic CLI (`./bazi`), and a 14-tool stdio MCP server, with zero database state and machine-readable school rulings.
 
-English summary: **Metaphysics Engine is an open-source divination calculation engine** covering the traditional Chinese canon — BaZi, Zi Wei Dou Shu, Liu Yao (King Fang stem-branch attachment), Da Liu Ren, Qi Men Dun Jia, Ba Zhai feng shui, almanac day-selection and name grids — plus Tarot, I Ching, Zodiac and Synastry. Exposed as a documented HTTP API and an agent-callable CLI. Stateless pure calculation — no database, no accounts, no UI. Node.js / Express, optional Redis cache, pluggable AI providers, OpenAPI contract.
-
-**目录**：[项目定位](#项目定位--project-snapshot) · [核心能力](#核心能力--core-capabilities) · [快速开始](#快速开始--quick-start) · [调用示例](#调用示例--usage-examples) · [接口速查](#接口速查--api-endpoints) · [适用场景](#适用场景--use-cases) · [技术栈](#技术栈--tech-stack) · [环境变量](#环境变量--configuration) · [FAQ](#faq--常见问题) · [项目结构](#项目结构--repository-structure) · [测试](#测试--testing) · [生产部署](#部署与生产注意事项--production-notes) · [开发约定](#开发约定--development) · [限制](#限制与免责声明--limitations) · [文档](#文档--documentation)
+**目录**：[项目定位](#项目定位--project-snapshot) · [核心能力](#核心能力--core-capabilities) · [快速开始](#快速开始--quick-start) · [调用示例](#调用示例--usage-examples) · [接口速查](#接口速查--api-endpoints) · [适用场景与方案对比](#适用场景与方案对比--use-cases--alternatives) · [技术栈](#技术栈--tech-stack) · [环境变量](#环境变量--configuration) · [FAQ](#faq--常见问题) · [项目结构](#项目结构--repository-structure) · [测试](#测试--testing) · [生产部署](#部署与生产注意事项--production-notes) · [开发约定](#开发约定--development) · [限制](#限制与免责声明--limitations) · [文档](#文档--documentation)
 
 ## 项目定位 / Project Snapshot
 
-| 维度         | 说明                                                                                     |
-| ------------ | ---------------------------------------------------------------------------------------- |
-| 项目类型     | 玄学 / 占星 / 命理**算法能力层**（开源 MIT），以自部署 HTTP API + 程序化 CLI 交付        |
-| 解决问题     | 把命理算法里那些「写错也不会报错」的语义边界做成可测试、有契约、可被程序调用的能力       |
-| 适合谁       | 要给产品接命理计算的后端开发者，以及要给 AI Agent 接一个真实排盘工具的团队               |
-| 消费方式     | 直接调 HTTP API；用 `./bazi calc` / `./bazi cast`；或作为 agent tool 接入                |
-| 运行形态     | **无状态纯计算**：没有数据库、没有账号、没有会话、不写文件                               |
-| 唯一外部依赖 | Redis，且是**可选的纯缓存**（只影响跨实例排盘缓存命中率，不影响结果）                    |
-| 技术栈       | Node.js 20+, Express 4, Node.js test runner                                              |
-| 本地前置     | Node.js 20+ 和 npm。不需要 Docker，不需要数据库                                          |
-| AI 能力      | mock / OpenAI / Anthropic 文本解读，可按请求覆盖；不配密钥时排盘照常工作                 |
-| 开发入口     | 仓库根 `./bazi` 程序化 CLI：算法调用、环境准备、起停引擎、测试，全部支持 `--json`        |
-| 主要入口     | API 路由在 `backend/routes`；算法逻辑在 `backend/services`                               |
-| 接口契约     | OpenAPI 描述在 [docs/openapi.json](docs/openapi.json)，运行时挂在 `/api-docs`，CI 守快照 |
-| 许可证       | MIT。见 [LICENSE](LICENSE)                                                               |
-| 重要限制     | 输出仅适合娱乐、文化研究或产品原型验证；不要当作医疗、法律、投资、人生决策建议           |
+| 维度         | 说明                                                                                                |
+| ------------ | --------------------------------------------------------------------------------------------------- |
+| 规范实体名   | `metaphysics-engine`（当前版本 `0.3.0`，CLI 入口 `./bazi`）                                         |
+| 项目类型     | 玄学 / 占星 / 命理**无状态算法能力层**（开源 MIT），以自部署 HTTP API + 程序化 CLI + MCP 交付       |
+| 解决什么问题 | 把命理算法里那些「写错也不会报错」的节气、子时、真太阳时与流派边界做成可测试、有契约的可调用能力    |
+| 适合谁       | 要给产品接命理计算的后端开发者，以及要给 AI Agent 接真实排盘工具的工程团队                          |
+| 消费方式     | 直接调 HTTP API；运行 `./bazi calc` / `./bazi cast`；挂载 `./bazi mcp`；或 `./bazi schema` 导出     |
+| 运行形态     | **无状态纯计算**：没有数据库、没有账号、没有会话、不写业务文件                                      |
+| 唯一外部依赖 | Redis，且是**可选的纯缓存**（仅用于多实例共享八字排盘缓存命中率，不影响结果正确性）                 |
+| 技术栈       | Node.js 20+, Express 4, `@modelcontextprotocol/sdk`, `lunar-javascript`, Node.js test runner        |
+| 本地前置     | Node.js 20+ 和 npm。不需要 Docker，不需要数据库                                                     |
+| AI 能力      | `mock` / `openai` / `anthropic` 文本解读，可按请求覆盖；不配任何 API Key 时确定性排盘照常工作       |
+| 接口契约     | OpenAPI `3.0.3` 共 31 条路径（[docs/openapi.json](docs/openapi.json)），挂于 `/api-docs`，CI 守快照 |
+| 口径真源     | [`backend/constants/rulings.js`](backend/constants/rulings.js)，响应回带 `school` 字段且受测试锁死  |
+| 许可证       | MIT。见 [LICENSE](LICENSE)                                                                          |
+| 重要限制     | 输出仅适合娱乐、文化研究、算法研究或产品原型；不可作为医疗、法律、投资或人生重大决策建议            |
 
-### 这不是什么 / What it is not
+### 定位边界：是什么 / 不是什么（What It Is / What It Is Not）
 
-- 不是网页应用，仓库不含任何前端代码，也不提供线上实例。界面由你自己实现。
-- 不是托管的在线算命服务。
-- 不是一个纯 npm 八字算法库；计算逻辑是服务内部的 service，通过 HTTP 和 CLI 暴露，不单独发包。
-- 不是带账号系统的后端脚手架——注册、登录、OAuth、历史记录、收藏这些能力**已经从项目中移除**，它们属于调用方。
-- 不是对命理、占星准确性的科学背书。
-- 不是开箱即用的商业合规方案（应用商店、微信、支付、广告和各地法规需自行处理）。
+| 维度           | 它是（What It Is）                                                               | 它不是（What It Is Not）                                                     |
+| -------------- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **产品形态**   | 纯后端无状态 HTTP 服务 + 程序化 `./bazi` CLI + stdio MCP Server                  | **不是**带界面的网页应用（仓库不含任何前端代码），也不提供托管线上实例       |
+| **分发方式**   | 自部署开源源码与 Docker 镜像（`backend/Dockerfile`），通过 HTTP / CLI / MCP 消费 | **不是**独立发布的 npm 纯函数算法库，也不提供公共 SaaS 在线算命服务          |
+| **账号与存储** | 零数据库、零会话、零持久化；界面、用户体系与历史收藏完全交给调用方               | **不是**带注册、登录、OAuth 或数据库迁移的后端脚手架（相关存储层已彻底移除） |
+| **能力边界**   | **结构归引擎，断语归调用方**：精确输出干支星门生克与客观关系量                   | **不是**对命理/占星准确性的科学背书，也不硬编码各派争议断语                  |
+| **合规边界**   | MIT 开源代码授权与可复现参考实现                                                 | **不是**开箱即用的商业合规方案（应用商店、微信、支付与地区法规需部署者自负） |
 
 ## 核心能力 / Core Capabilities
 
@@ -236,12 +239,23 @@ curl -X POST http://127.0.0.1:4000/api/tarot/draw \
 | 接口文档（生产带 Basic Auth） | `GET /api-docs` · `GET /api-docs.json`                                                          | —                      |
 | 指标（Bearer token）          | `GET /metrics`                                                                                  | —                      |
 
-## 适用场景 / Use Cases
+## 适用场景与方案对比 / Use Cases & Alternatives
 
-- 给已有产品（Web、小程序、App）接一套命理/占星计算后端，界面完全自己实现。
-- 作为智能体的专业计算工具：让模型去调真实的排盘算法，而不是自己编排盘结果。
-- 参考一个无状态计算服务如何组织接口契约、健康检查、优雅停机和可观测性。
+- 给已有产品（Web、小程序、App）接一套命理/占星计算后端，界面与账号体系完全自己实现。
+- 作为智能体的专业计算工具：通过 `./bazi mcp` 或 `./bazi schema` 让大模型调用真实排盘算法，而不是让模型凭记忆编造四柱、星曜与局数。
+- 参考一个无状态计算服务如何组织 OpenAPI 契约、探针、优雅停机和 Prometheus 可观测性。
 - 研究各家术数算法里的流派选择与边界条件（节气交接、晚子时、闰月、真太阳时、中气换将、拆补定局）。
+
+### 同类方案对比（架构适配速览）
+
+| 对比维度                  |                            **Metaphysics Engine**                             |         仅用基础历法库（如 `lunar-javascript`）         |   商业算命 / 占星 SaaS API   |        直接让 LLM 裸算排盘        |    全栈社区 Web UI 模板    |
+| ------------------------- | :---------------------------------------------------------------------------: | :-----------------------------------------------------: | :--------------------------: | :-------------------------------: | :------------------------: |
+| **自部署 & 开源**         |                             ✅ MIT 全源码可自托管                             |                    ✅ 开源基础历法库                    |       ❌ 闭源托管 SaaS       |          ❌ 依赖模型推理          |   ✅ 通常含前端与数据库    |
+| **覆盖术数广度**          | ✅ 14 能力模块（八字/紫微/六爻/六壬/奇门/八宅/择吉/姓名/塔罗/周易/星座/合盘） | ❌ 仅干支/农历/基础黄历，无紫微/奇门/六壬/六爻/八宅装配 | 视服务商而定（通常按项付费） |       不稳定（易混淆流派）        | 视模板而定（往往只含单门） |
+| **排盘确定性与契约**      |        ✅ 31 条 OpenAPI `3.0.3` 路径 + `./bazi` `--json` + CI 快照校验        |                  需自行封装接口与校验                   |     ✅ 有接口但规则黑盒      | ❌ 节气交接/真太阳时/排盘极易幻觉 |   耦合前端页面与业务模型   |
+| **流派口径透明度**        |        ✅ `backend/constants/rulings.js` 唯一真源 + 响应 `school` 字段        |                   无内置多派口径清单                    |     ❌ 黑盒规则不可审阅      |        ❌ 每次回答流派混用        |  往往硬编码在页面或服务里  |
+| **AI Agent / MCP 就绪**   |             ✅ 原生 `./bazi mcp`（14 只读工具）+ `./bazi schema`              |                      ❌ 需自行包裹                      |     需手写 Tool Wrapper      |                 —                 |    ❌ 面向人类 UI 点击     |
+| **零数据库 / 无状态扩容** |                       ✅ 纯内存计算（Redis 仅可选缓存）                       |                       ✅ 纯计算库                       |      依赖云端配额与网络      |                 —                 |  ❌ 需维护 DB、账号与迁移  |
 
 ## 技术栈 / Tech Stack
 
@@ -390,17 +404,25 @@ npm run test:engine      # 能力契约验证（要引擎在跑）
 - AI 解读依赖外部模型质量、密钥、速率限制和提示词；mock provider 仅用于开发和演示。
 - 反向代理、域名、证书和平台合规需要部署者自行配置与验证。
 
-## 搜索关键词 / Search Keywords
+## 搜索意图与检索映射 / Search Intent & SEO / AEO / GEO
 
-**中文**：Metaphysics Engine、术数算法能力层、八字排盘 API、紫微斗数开源、六爻纳甲引擎、大六壬、奇门遁甲 API、八宅风水、择吉、姓名五格、塔罗 API、周易起卦、合盘、无状态命理引擎、AI Agent 排盘工具、自部署玄学 API。
+<details>
+<summary><b>常见搜索问题与本仓库的对应解答（点击展开）</b></summary>
 
-**English**: Metaphysics Engine, Chinese metaphysics API, BaZi calculation API, Zi Wei Dou Shu API, Liu Yao CLI, Da Liu Ren calculator, Qi Men Dun Jia API, Ba Zhai feng shui, Tarot API, I Ching, Synastry, agent-callable divination CLI, stateless fortune-telling backend, OpenAPI metaphysics.
+| 常见搜索意图 / Query                                    | 本仓库的解答与直达入口                                                                                                                                   |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 开源八字排盘 API / Chinese BaZi calculation API Node.js | `POST /api/bazi/calculate` 与 `./bazi calc bazi`，含真太阳时、加权五行、格局、双用神与大运流年 → [接口速查](#接口速查--api-endpoints)                    |
+| 紫微斗数开源排盘引擎 / Zi Wei Dou Shu JSON API          | `POST /api/ziwei/calculate` 与 `./bazi calc ziwei`，输出十二宫、十四主星、二十颗乙级星、三方四正与 `flowYear` → [核心能力](#核心能力--core-capabilities) |
+| 奇门遁甲 API 拆补法转盘 / Qi Men Dun Jia API            | `POST /api/qimen/chart` 与 `./bazi calc qimen`，拆补定局 + 转盘九星八门八神 + 门迫/入墓/击刑关系量 → [docs/api.md](docs/api.md)                          |
+| 六爻纳甲装卦算法 / 大六壬九宗门起课引擎                 | `./bazi calc liuyao`（七规则推八宫 + 动爻生克 + 周易爻辞）与 `./bazi calc liuren`（九宗门全备）→ [docs/api.md](docs/api.md)                              |
+| 八宅风水 / 三层择吉黄历 / 姓名五格 API                  | `POST /api/fengshui/bazhai` · `GET /api/fengshui/almanac` · `POST /api/fengshui/name` → [接口速查](#接口速查--api-endpoints)                             |
+| 给 AI Agent 接真实算命/排盘工具 / Astrology MCP Server  | 运行 `./bazi mcp`（14 个只读能力工具）或 `./bazi schema --format openai` → [调用示例](#调用示例--usage-examples)                                         |
+| 无状态真太阳时计算 / 海外出生节气交接怎么处理           | 88 城地点表 + `"纬度,经度"` 坐标，分离 `chartTime.used` 与 `chartTime.termReference` → [FAQ](#faq--常见问题)                                             |
+| 自部署周易起卦 & 带种子的塔罗抽牌 API                   | `./bazi cast iching`（维基文库《周易》底本）与 `./bazi cast tarot`（FNV-1a + mulberry32 可复现 `seed`）→ [docs/api.md](docs/api.md)                      |
 
-**GitHub About 建议**：`Stateless Chinese metaphysics calculation engine — BaZi, Zi Wei, Liu Yao, Da Liu Ren, Qi Men, Ba Zhai, Tarot, I Ching — HTTP API + agent CLI.`
+</details>
 
-**Topics 建议**：`metaphysics-engine` `bazi` `ziwei` `liuyao` `daliuren` `qimen` `bazhai` `tarot` `iching` `divination` `chinese-metaphysics` `openapi` `agent-callable-cli` `self-hosted` `nodejs`
-
-AI 检索摘要：[llms.txt](llms.txt)。
+<sub>**Keywords / 关键词**：Metaphysics Engine · 无状态术数算法能力层 · 八字排盘 API · 紫微斗数开源引擎 · 六爻纳甲 · 大六壬 · 奇门遁甲 API · 八宅风水 · 择吉黄历 · 姓名五格 · 塔罗 API · 周易起卦 · 真太阳时排盘 · AI Agent 排盘工具 · MCP Server · OpenAPI 3.0.3 · Node.js Express · Chinese metaphysics API · BaZi calculation API · Zi Wei Dou Shu API · Qi Men Dun Jia API · Liu Yao CLI · Da Liu Ren calculator · agent-callable divination CLI · stateless fortune-telling backend.</sub>
 
 ## 文档 / Documentation
 
@@ -413,8 +435,10 @@ AI 检索摘要：[llms.txt](llms.txt)。
 - [docs/operations.md](docs/operations.md): 运维与排错
 - [docs/development.md](docs/development.md): 本地开发
 - [docs/api.md](docs/api.md): HTTP API 导览
+- [docs/openapi.json](docs/openapi.json): OpenAPI 3.0.3 机器契约
 - [docs/faq.md](docs/faq.md): 常见问题
-- [llms.txt](llms.txt): AI / 答案引擎可读项目摘要
+- [llms.txt](llms.txt): AI / 答案引擎可读项目摘要（`llmstxt.org`）
+- [codemeta.json](codemeta.json): CodeMeta 2.0 开源软件结构化元数据
 - [.claude/skills/bazi-cli/SKILL.md](.claude/skills/bazi-cli/SKILL.md): 算法语义边界与 CLI 用法
 - [CONTRIBUTING.md](CONTRIBUTING.md): 开发约定、质量门槛与算法改动判据
 - [PRODUCTION.md](PRODUCTION.md): 生产部署细节
@@ -423,3 +447,18 @@ AI 检索摘要：[llms.txt](llms.txt)。
 ## License
 
 MIT License。见 [LICENSE](LICENSE)。与社区 Web UI 全栈模板互不同步，不要搬代码。
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=qilaidev/metaphysics-engine&type=Date)](https://www.star-history.com/#qilaidev/metaphysics-engine&Date)
+
+---
+
+## Architecture & Ecosystem · qilai (`qilaidav.com`)
+
+This open-source repository is engineered and maintained by **[qilai · qilaidav](https://qilaidav.com)** — an independent systems engineering studio focused on **Deterministic Systems Engineering & High-Signal Technical Diagnostics**.
+
+- **Studio Website**: [https://qilaidav.com](https://qilaidav.com) ([English](https://qilaidav.com/en/))
+- **Engineering Pillar Alignment**: [05 · Enterprise Requirement Ops & AI Foundation (Deterministic CLI / MCP)](https://qilaidav.com/workspace/) · [English Hub](https://qilaidav.com/en/workspace/)
+- **Technical Notes & Production Field Reports**: [https://qilaidav.com/notes/](https://qilaidav.com/notes/)
+- **Direct Engineering Contact**: [Telegram @BD8888](https://t.me/BD8888) · [Public Channel @AIKB8](https://t.me/AIKB8) · `hello@qilaidav.com`
